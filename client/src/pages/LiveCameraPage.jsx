@@ -72,8 +72,8 @@ const LiveCameraPage = () => {
       const h = det.h * viewport.height;
 
       ctx.lineWidth = 2;
-      ctx.strokeStyle = '#22c55e';
-      ctx.fillStyle = 'rgba(34, 197, 94, 0.15)';
+      ctx.strokeStyle = '#0ea5e9';
+      ctx.fillStyle = 'rgba(14, 165, 233, 0.12)';
       ctx.strokeRect(x, y, w, h);
       ctx.fillRect(x, y, w, h);
 
@@ -83,7 +83,7 @@ const LiveCameraPage = () => {
       const textX = x;
       const textY = Math.max(16, y - 6);
 
-      ctx.fillStyle = '#22c55e';
+      ctx.fillStyle = '#0ea5e9';
       ctx.fillRect(textX, textY - 14, textWidth, 16);
       ctx.fillStyle = '#020617';
       ctx.fillText(label, textX + 5, textY - 2);

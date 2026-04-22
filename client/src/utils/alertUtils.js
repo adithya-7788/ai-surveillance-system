@@ -30,6 +30,11 @@ export const getAlertBadge = (type, status = 'active') => {
       bgColor: 'bg-red-900/40',
       textColor: 'text-red-300',
     },
+    suspicious: {
+      label: 'Suspicious',
+      bgColor: 'bg-red-900/40',
+      textColor: 'text-red-300',
+    },
   };
 
   const badge = badges[type] || badges.entry;
@@ -49,6 +54,14 @@ export const getAlertMetadata = (alert) => {
 
   if (alert.type === 'suspicious_activity' && alert.metadata.reason) {
     return alert.metadata.reason;
+  }
+
+  if (alert.type === 'suspicious') {
+    const duration = Number(alert.metadata.duration);
+    if (Number.isFinite(duration) && duration > 0) {
+      return `Duration: ${duration}s`;
+    }
+    return alert.metadata.reason || null;
   }
 
   if (alert.type === 'loitering' && alert.metadata.duration) {

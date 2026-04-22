@@ -156,7 +156,7 @@ const postVisionFrame = async (req, res, next) => {
 
     const [visionResponse, config, settings] = await Promise.all([
       runVisionDetection(image),
-      Config.findOne({ userId: req.user._id }).select('entryLine insideDirection restrictedZones'),
+      Config.findOne({ userId: req.user._id }).select('entryLine insideDirection restrictedZones zoneMask insideMask roiMask'),
       Settings.findOne({ userId: req.user._id }).lean(),
     ]);
 
@@ -182,12 +182,26 @@ const postVisionFrame = async (req, res, next) => {
       restrictedZones: config?.restrictedZones || [],
       settings,
       objectObservations,
+      zoneMask: config?.zoneMask || null,
+      insideMask: config?.insideMask || null,
+      roiMask: config?.roiMask || null,
     });
+
+    const detectionAnnotations = state.detectionAnnotations || {};
 
     await persistAlertChanges(userId, state.changes);
 
     const responsePayload = {
-      detections: relativeDetections.map(({ cx, cy, ...rest }) => rest),
+      detections: relativeDetections.map(({ cx, cy, ...rest }) => {
+        const annotations = detectionAnnotations[String(rest.id)] || detectionAnnotations[Number(rest.id)] || {};
+        return {
+          ...rest,
+          zoneInside: Boolean(annotations.zoneInside),
+          zoneDurationSeconds: Number(annotations.zoneDurationSeconds || 0),
+          roiInside: Boolean(annotations.roiInside),
+          roiDurationSeconds: Number(annotations.roiDurationSeconds || 0),
+        };
+      }),
       stats: state.stats,
       alerts: state.alerts.slice(0, 20),
       dropped: false,

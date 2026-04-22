@@ -1,72 +1,152 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+const MASK_WIDTH = 160;
+const MASK_HEIGHT = 90;
+const DEFAULT_BRUSH_SIZE = 6;
+
 const clamp = (value) => Math.min(1, Math.max(0, value));
+const createEmptyMask = () => new Uint8Array(MASK_WIDTH * MASK_HEIGHT);
 
-const lineSide = (point, line) => {
-  const ax = line.x1;
-  const ay = line.y1;
-  const bx = line.x2;
-  const by = line.y2;
-
-  return (bx - ax) * (point.y - ay) - (by - ay) * (point.x - ax);
+const encodeMaskData = (maskArray) => {
+  let binary = '';
+  for (let i = 0; i < maskArray.length; i += 1) binary += String.fromCharCode(maskArray[i]);
+  return btoa(binary);
 };
 
-const normalizeRectangle = (start, end) => {
-  const x = Math.min(start.x, end.x);
-  const y = Math.min(start.y, end.y);
-  const width = Math.abs(end.x - start.x);
-  const height = Math.abs(end.y - start.y);
-
-  return {
-    x: clamp(x),
-    y: clamp(y),
-    width: clamp(width),
-    height: clamp(height),
-  };
+const decodeMaskData = (base64, width, height) => {
+  try {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) ? 1 : 0;
+    return bytes.length === width * height ? bytes : null;
+  } catch {
+    return null;
+  }
 };
-
-const toPixelLine = (line, width, height) => ({
-  x1: line.x1 * width,
-  y1: line.y1 * height,
-  x2: line.x2 * width,
-  y2: line.y2 * height,
-});
-
-const toPixelRect = (rect, width, height) => ({
-  x: rect.x * width,
-  y: rect.y * height,
-  width: rect.width * width,
-  height: rect.height * height,
-});
 
 const getContainViewport = (containerWidth, containerHeight, frameWidth, frameHeight) => {
   if (!containerWidth || !containerHeight || !frameWidth || !frameHeight) {
     return { x: 0, y: 0, width: containerWidth, height: containerHeight };
   }
-
   const containerRatio = containerWidth / containerHeight;
   const frameRatio = frameWidth / frameHeight;
-
   if (frameRatio > containerRatio) {
     const width = containerWidth;
     const height = width / frameRatio;
     return { x: 0, y: (containerHeight - height) / 2, width, height };
   }
-
   const height = containerHeight;
   const width = height * frameRatio;
   return { x: (containerWidth - width) / 2, y: 0, width, height };
 };
 
-export const useConfigCanvas = (videoRef, canvasRef) => {
-  const [mode, setMode] = useState('line');
-  const [config, setConfig] = useState({ entryLine: null, insideDirection: null, restrictedZones: [] });
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+const toMaskPayload = (maskData) => ({
+  width: MASK_WIDTH,
+  height: MASK_HEIGHT,
+  data: encodeMaskData(maskData),
+});
 
-  const lineStartRef = useRef(null);
-  const rectStartRef = useRef(null);
-  const isRectDrawingRef = useRef(false);
-  const previewRectRef = useRef(null);
+export const useConfigCanvas = (videoRef, canvasRef) => {
+  const [config, setConfigState] = useState({
+    entryLine: null,
+    insideDirection: null,
+    restrictedZones: [],
+    zoneMask: null,
+    insideMask: toMaskPayload(createEmptyMask()),
+    roiMask: toMaskPayload(createEmptyMask()),
+  });
+
+  const [brushMode, setBrushMode] = useState('inside'); // inside | roi | erase
+  const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE);
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const [cursorPoint, setCursorPoint] = useState(null);
+
+  const isDrawingRef = useRef(false);
+  const lastPointRef = useRef(null);
+  const insideMaskRef = useRef(createEmptyMask());
+  const roiMaskRef = useRef(createEmptyMask());
+
+  const setConfig = useCallback((nextConfigOrUpdater) => {
+    setConfigState((previous) => {
+      const nextConfig = typeof nextConfigOrUpdater === 'function' ? nextConfigOrUpdater(previous) : nextConfigOrUpdater;
+      const nextInsideMask = nextConfig?.insideMask || nextConfig?.zoneMask;
+      const nextRoiMask = nextConfig?.roiMask;
+
+      if (nextInsideMask && typeof nextInsideMask === 'object') {
+        const width = Number(nextInsideMask.width) || MASK_WIDTH;
+        const height = Number(nextInsideMask.height) || MASK_HEIGHT;
+        const decoded = decodeMaskData(String(nextInsideMask.data || ''), width, height);
+        if (decoded && width === MASK_WIDTH && height === MASK_HEIGHT) insideMaskRef.current = decoded;
+      }
+
+      if (nextRoiMask && typeof nextRoiMask === 'object') {
+        const width = Number(nextRoiMask.width) || MASK_WIDTH;
+        const height = Number(nextRoiMask.height) || MASK_HEIGHT;
+        const decoded = decodeMaskData(String(nextRoiMask.data || ''), width, height);
+        if (decoded && width === MASK_WIDTH && height === MASK_HEIGHT) roiMaskRef.current = decoded;
+      }
+
+      return {
+        entryLine: null,
+        insideDirection: null,
+        restrictedZones: [],
+        zoneMask: null,
+        insideMask: toMaskPayload(insideMaskRef.current),
+        roiMask: toMaskPayload(roiMaskRef.current),
+      };
+    });
+  }, []);
+
+  const commitMasksToConfig = useCallback(() => {
+    setConfigState((prev) => ({
+      ...prev,
+      zoneMask: null,
+      insideMask: toMaskPayload(insideMaskRef.current),
+      roiMask: toMaskPayload(roiMaskRef.current),
+    }));
+  }, []);
+
+  const applyBrushToMask = useCallback((maskRef, point, value) => {
+    const x = Math.max(0, Math.min(MASK_WIDTH - 1, Math.floor(point.x * MASK_WIDTH)));
+    const y = Math.max(0, Math.min(MASK_HEIGHT - 1, Math.floor(point.y * MASK_HEIGHT)));
+    const radius = Math.max(1, Math.round(brushSize));
+    const radiusSq = radius * radius;
+
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (dx * dx + dy * dy > radiusSq) continue;
+        const px = x + dx;
+        const py = y + dy;
+        if (px < 0 || py < 0 || px >= MASK_WIDTH || py >= MASK_HEIGHT) continue;
+        maskRef.current[py * MASK_WIDTH + px] = value;
+      }
+    }
+  }, [brushSize]);
+
+  const paintLine = useCallback((fromPoint, toPoint) => {
+    const fromX = fromPoint.x * MASK_WIDTH;
+    const fromY = fromPoint.y * MASK_HEIGHT;
+    const toX = toPoint.x * MASK_WIDTH;
+    const toY = toPoint.y * MASK_HEIGHT;
+
+    const distance = Math.max(Math.abs(toX - fromX), Math.abs(toY - fromY));
+    const steps = Math.max(1, Math.ceil(distance));
+
+    for (let step = 0; step <= steps; step += 1) {
+      const t = step / steps;
+      const x = clamp((fromX + (toX - fromX) * t) / MASK_WIDTH);
+      const y = clamp((fromY + (toY - fromY) * t) / MASK_HEIGHT);
+
+      if (brushMode === 'inside') {
+        applyBrushToMask(insideMaskRef, { x, y }, 1);
+      } else if (brushMode === 'roi') {
+        applyBrushToMask(roiMaskRef, { x, y }, 1);
+      } else {
+        applyBrushToMask(insideMaskRef, { x, y }, 0);
+        applyBrushToMask(roiMaskRef, { x, y }, 0);
+      }
+    }
+  }, [applyBrushToMask, brushMode]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -78,68 +158,34 @@ export const useConfigCanvas = (videoRef, canvasRef) => {
     context.clearRect(0, 0, canvas.width, canvas.height);
 
     const viewport = getContainViewport(canvas.width, canvas.height, videoRef.current?.videoWidth, videoRef.current?.videoHeight);
+    const cellW = viewport.width / MASK_WIDTH;
+    const cellH = viewport.height / MASK_HEIGHT;
 
-    if (config.entryLine) {
-      const line = toPixelLine(config.entryLine, viewport.width, viewport.height);
-      const offsetLine = {
-        x1: line.x1 + viewport.x,
-        y1: line.y1 + viewport.y,
-        x2: line.x2 + viewport.x,
-        y2: line.y2 + viewport.y,
-      };
-      context.beginPath();
-      context.moveTo(offsetLine.x1, offsetLine.y1);
-      context.lineTo(offsetLine.x2, offsetLine.y2);
-      context.lineWidth = 3;
-      context.strokeStyle = '#0ea5e9';
-      context.shadowColor = 'rgba(14, 165, 233, 0.7)';
-      context.shadowBlur = 8;
-      context.stroke();
-      context.shadowBlur = 0;
-
-      if (config.insideDirection) {
-        const midX = (offsetLine.x1 + offsetLine.x2) / 2;
-        const midY = (offsetLine.y1 + offsetLine.y2) / 2;
-        const dx = offsetLine.x2 - offsetLine.x1;
-        const dy = offsetLine.y2 - offsetLine.y1;
-        const length = Math.hypot(dx, dy) || 1;
-        const offset = 20;
-        const normalX = (-dy / length) * offset;
-        const normalY = (dx / length) * offset;
-        const labelX = config.insideDirection === 'positive' ? midX + normalX : midX - normalX;
-        const labelY = config.insideDirection === 'positive' ? midY + normalY : midY - normalY;
-
-        context.beginPath();
-        context.fillStyle = '#22c55e';
-        context.arc(labelX, labelY, 6, 0, Math.PI * 2);
-        context.fill();
-
-        context.font = '12px Inter, system-ui, sans-serif';
-        context.fillStyle = '#bbf7d0';
-        context.fillText('Inside', labelX + 10, labelY + 4);
+    for (let y = 0; y < MASK_HEIGHT; y += 1) {
+      for (let x = 0; x < MASK_WIDTH; x += 1) {
+        const idx = y * MASK_WIDTH + x;
+        const inInside = insideMaskRef.current[idx] === 1;
+        const inRoi = roiMaskRef.current[idx] === 1;
+        if (!inInside && !inRoi) continue;
+        context.fillStyle = inInside && inRoi ? 'rgba(250, 204, 21, 0.34)' : inInside ? 'rgba(34, 197, 94, 0.30)' : 'rgba(239, 68, 68, 0.30)';
+        context.fillRect(viewport.x + x * cellW, viewport.y + y * cellH, cellW + 0.5, cellH + 0.5);
       }
     }
 
-    config.restrictedZones.forEach((zone) => {
-      const rect = toPixelRect(zone, viewport.width, viewport.height);
-      context.fillStyle = 'rgba(239, 68, 68, 0.22)';
-      context.strokeStyle = '#ef4444';
+    if (cursorPoint) {
+      context.beginPath();
       context.lineWidth = 2;
-      context.fillRect(rect.x + viewport.x, rect.y + viewport.y, rect.width, rect.height);
-      context.strokeRect(rect.x + viewport.x, rect.y + viewport.y, rect.width, rect.height);
-    });
-
-    if (previewRectRef.current) {
-      const preview = toPixelRect(previewRectRef.current, viewport.width, viewport.height);
-      context.fillStyle = 'rgba(59, 130, 246, 0.15)';
-      context.strokeStyle = '#3b82f6';
-      context.lineWidth = 2;
-      context.setLineDash([6, 4]);
-      context.fillRect(preview.x + viewport.x, preview.y + viewport.y, preview.width, preview.height);
-      context.strokeRect(preview.x + viewport.x, preview.y + viewport.y, preview.width, preview.height);
-      context.setLineDash([]);
+      context.strokeStyle = brushMode === 'inside' ? '#22c55e' : brushMode === 'roi' ? '#ef4444' : '#f8fafc';
+      context.arc(
+        viewport.x + cursorPoint.x * viewport.width,
+        viewport.y + cursorPoint.y * viewport.height,
+        Math.max(4, brushSize * (viewport.width / MASK_WIDTH)),
+        0,
+        Math.PI * 2
+      );
+      context.stroke();
     }
-  }, [canvasRef, config]);
+  }, [brushMode, brushSize, canvasRef, cursorPoint, videoRef]);
 
   const syncCanvasToVideo = useCallback(() => {
     const canvas = canvasRef.current;
@@ -149,7 +195,6 @@ export const useConfigCanvas = (videoRef, canvasRef) => {
     const { width, height } = video.getBoundingClientRect();
     const nextWidth = Math.max(0, Math.round(width));
     const nextHeight = Math.max(0, Math.round(height));
-
     if (nextWidth === 0 || nextHeight === 0) return;
 
     if (canvas.width !== nextWidth || canvas.height !== nextHeight) {
@@ -159,192 +204,131 @@ export const useConfigCanvas = (videoRef, canvasRef) => {
     }
   }, [canvasRef, videoRef]);
 
-  const toRelativePoint = useCallback(
-    (event) => {
-      const canvas = canvasRef.current;
-      if (!canvas || canvas.width === 0 || canvas.height === 0) return null;
+  const toRelativePoint = useCallback((event) => {
+    const canvas = canvasRef.current;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) return null;
+    const rect = canvas.getBoundingClientRect();
+    const viewport = getContainViewport(rect.width, rect.height, videoRef.current?.videoWidth, videoRef.current?.videoHeight);
 
-      const rect = canvas.getBoundingClientRect();
-      const viewport = getContainViewport(rect.width, rect.height, videoRef.current?.videoWidth, videoRef.current?.videoHeight);
-      const localX = event.clientX - rect.left - viewport.x;
-      const localY = event.clientY - rect.top - viewport.y;
+    const localX = event.clientX - rect.left - viewport.x;
+    const localY = event.clientY - rect.top - viewport.y;
+    if (localX < 0 || localY < 0 || localX > viewport.width || localY > viewport.height) return null;
 
-      if (localX < 0 || localY < 0 || localX > viewport.width || localY > viewport.height) {
-        return null;
-      }
+    return { x: clamp(localX / viewport.width), y: clamp(localY / viewport.height) };
+  }, [canvasRef, videoRef]);
 
-      const x = clamp(localX / viewport.width);
-      const y = clamp(localY / viewport.height);
+  const clearInsideMask = useCallback(() => {
+    insideMaskRef.current = createEmptyMask();
+    commitMasksToConfig();
+    draw();
+  }, [commitMasksToConfig, draw]);
 
-      return { x, y };
-    },
-    [canvasRef]
-  );
+  const clearRoiMask = useCallback(() => {
+    roiMaskRef.current = createEmptyMask();
+    commitMasksToConfig();
+    draw();
+  }, [commitMasksToConfig, draw]);
 
   const clearAll = useCallback(() => {
-    lineStartRef.current = null;
-    rectStartRef.current = null;
-    isRectDrawingRef.current = false;
-    previewRectRef.current = null;
-    setConfig({ entryLine: null, insideDirection: null, restrictedZones: [] });
-  }, []);
-
-  const handleCanvasClick = useCallback(
-    (event) => {
-      if (mode !== 'line') return;
-
-      const point = toRelativePoint(event);
-      if (!point) return;
-
-      if (config.entryLine && !config.insideDirection) {
-        const side = lineSide(point, config.entryLine);
-        if (Math.abs(side) <= 0.003) {
-          return;
-        }
-
-        setConfig((prev) => ({
-          ...prev,
-          insideDirection: side > 0 ? 'positive' : 'negative',
-        }));
-        return;
-      }
-
-      if (!lineStartRef.current) {
-        lineStartRef.current = point;
-        return;
-      }
-
-      const start = lineStartRef.current;
-      lineStartRef.current = null;
-
-      setConfig((prev) => ({
-        ...prev,
-        entryLine: {
-          x1: start.x,
-          y1: start.y,
-          x2: point.x,
-          y2: point.y,
-        },
-        insideDirection: null,
-      }));
-    },
-    [config.entryLine, config.insideDirection, mode, toRelativePoint]
-  );
-
-  const handleMouseDown = useCallback(
-    (event) => {
-      if (mode !== 'rectangle') return;
-
-      const point = toRelativePoint(event);
-      if (!point) return;
-
-      rectStartRef.current = point;
-      isRectDrawingRef.current = true;
-      previewRectRef.current = null;
-      draw();
-    },
-    [draw, mode, toRelativePoint]
-  );
-
-  const handleMouseMove = useCallback(
-    (event) => {
-      if (mode !== 'rectangle' || !isRectDrawingRef.current || !rectStartRef.current) return;
-
-      const currentPoint = toRelativePoint(event);
-      if (!currentPoint) return;
-
-      previewRectRef.current = normalizeRectangle(rectStartRef.current, currentPoint);
-      draw();
-    },
-    [draw, mode, toRelativePoint]
-  );
-
-  const finalizeRectangle = useCallback(
-    (event) => {
-      if (mode !== 'rectangle' || !isRectDrawingRef.current || !rectStartRef.current) return;
-
-      const endPoint = toRelativePoint(event);
-
-      if (endPoint) {
-        const nextRect = normalizeRectangle(rectStartRef.current, endPoint);
-
-        if (nextRect.width > 0.002 && nextRect.height > 0.002) {
-          setConfig((prev) => ({
-            ...prev,
-            restrictedZones: [...prev.restrictedZones, nextRect],
-          }));
-        }
-      }
-
-      rectStartRef.current = null;
-      isRectDrawingRef.current = false;
-      previewRectRef.current = null;
-      draw();
-    },
-    [draw, mode, toRelativePoint]
-  );
-
-  const cancelRectanglePreview = useCallback(() => {
-    if (mode !== 'rectangle') return;
-
-    rectStartRef.current = null;
-    isRectDrawingRef.current = false;
-    previewRectRef.current = null;
+    isDrawingRef.current = false;
+    lastPointRef.current = null;
+    setCursorPoint(null);
+    insideMaskRef.current = createEmptyMask();
+    roiMaskRef.current = createEmptyMask();
+    commitMasksToConfig();
     draw();
-  }, [draw, mode]);
+  }, [commitMasksToConfig, draw]);
+
+  const handleMouseDown = useCallback((event) => {
+    const point = toRelativePoint(event);
+    if (!point) return;
+    isDrawingRef.current = true;
+    lastPointRef.current = point;
+    paintLine(point, point);
+    commitMasksToConfig();
+    draw();
+  }, [commitMasksToConfig, draw, paintLine, toRelativePoint]);
+
+  const handleMouseMove = useCallback((event) => {
+    const point = toRelativePoint(event);
+    if (!point) return;
+    setCursorPoint(point);
+
+    if (!isDrawingRef.current || !lastPointRef.current) {
+      draw();
+      return;
+    }
+
+    paintLine(lastPointRef.current, point);
+    lastPointRef.current = point;
+    commitMasksToConfig();
+    draw();
+  }, [commitMasksToConfig, draw, paintLine, toRelativePoint]);
+
+  const handleMouseUp = useCallback(() => {
+    isDrawingRef.current = false;
+    lastPointRef.current = null;
+    commitMasksToConfig();
+    draw();
+  }, [commitMasksToConfig, draw]);
+
+  const handleMouseLeave = useCallback(() => {
+    isDrawingRef.current = false;
+    lastPointRef.current = null;
+    setCursorPoint(null);
+    commitMasksToConfig();
+    draw();
+  }, [commitMasksToConfig, draw]);
 
   useEffect(() => {
     draw();
-  }, [draw, canvasSize, mode]);
+  }, [draw, canvasSize, brushMode, brushSize, config.insideMask, config.roiMask]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return undefined;
 
-    const handleLoadedMetadata = () => {
+    const onLoadedMetadata = () => {
       syncCanvasToVideo();
       draw();
     };
 
-    video.addEventListener('loadedmetadata', handleLoadedMetadata);
-
-    const resizeHandler = () => {
+    const onResize = () => {
       syncCanvasToVideo();
       draw();
     };
 
-    window.addEventListener('resize', resizeHandler);
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
+    window.addEventListener('resize', onResize);
 
     let resizeObserver;
     if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => {
-        syncCanvasToVideo();
-        draw();
-      });
+      resizeObserver = new ResizeObserver(onResize);
       resizeObserver.observe(video);
     }
 
     return () => {
-      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      window.removeEventListener('resize', resizeHandler);
-      if (resizeObserver) {
-        resizeObserver.disconnect();
-      }
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
+      window.removeEventListener('resize', onResize);
+      if (resizeObserver) resizeObserver.disconnect();
     };
   }, [draw, syncCanvasToVideo, videoRef]);
 
   return {
-    mode,
-    setMode,
+    brushMode,
+    setBrushMode,
+    brushSize,
+    setBrushSize,
     config,
     setConfig,
     clearAll,
+    clearInsideMask,
+    clearRoiMask,
     syncCanvasToVideo,
     draw,
-    handleCanvasClick,
     handleMouseDown,
     handleMouseMove,
-    handleMouseUp: finalizeRectangle,
-    handleMouseLeave: cancelRectanglePreview,
+    handleMouseUp,
+    handleMouseLeave,
   };
 };

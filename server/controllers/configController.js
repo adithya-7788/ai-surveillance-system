@@ -38,6 +38,26 @@ const validateRestrictedZones = (restrictedZones) => {
   });
 };
 
+const isValidBase64 = (value) => typeof value === 'string' && /^[A-Za-z0-9+/=\r\n]+$/.test(value);
+
+const validateMask = (mask, fieldName = 'mask') => {
+  if (mask === null || mask === undefined) return true;
+  if (!mask || typeof mask !== 'object') return false;
+
+  const { width, height, data } = mask;
+
+  if (!Number.isInteger(width) || width < 16 || width > 512) return false;
+  if (!Number.isInteger(height) || height < 16 || height > 512) return false;
+  if (!isValidBase64(data)) return false;
+
+  try {
+    const bytes = Buffer.from(data, 'base64');
+    return bytes.length === width * height;
+  } catch {
+    return false;
+  }
+};
+
 const getConfig = async (req, res, next) => {
   try {
     const config = await Config.findOne({ userId: req.user._id });
@@ -47,6 +67,9 @@ const getConfig = async (req, res, next) => {
         entryLine: null,
         insideDirection: null,
         restrictedZones: [],
+        zoneMask: null,
+        insideMask: null,
+        roiMask: null,
       });
     }
 
@@ -54,6 +77,9 @@ const getConfig = async (req, res, next) => {
       entryLine: config.entryLine,
       insideDirection: config.insideDirection,
       restrictedZones: config.restrictedZones,
+      zoneMask: config.zoneMask || null,
+      insideMask: config.insideMask || null,
+      roiMask: config.roiMask || null,
     });
   } catch (error) {
     return next(error);
@@ -62,7 +88,14 @@ const getConfig = async (req, res, next) => {
 
 const upsertConfig = async (req, res, next) => {
   try {
-    const { entryLine = null, insideDirection = null, restrictedZones = [] } = req.body || {};
+    const {
+      entryLine = null,
+      insideDirection = null,
+      restrictedZones = [],
+      zoneMask = null,
+      insideMask = null,
+      roiMask = null,
+    } = req.body || {};
 
     if (!validateEntryLine(entryLine)) {
       return res.status(400).json({ message: 'Invalid entryLine format. Values must be numbers between 0 and 1.' });
@@ -79,6 +112,27 @@ const upsertConfig = async (req, res, next) => {
       });
     }
 
+    if (!validateMask(zoneMask, 'zoneMask')) {
+      return res.status(400).json({
+        message:
+          'Invalid zoneMask format. Expected { width, height, data(base64) } where decoded data length equals width*height.',
+      });
+    }
+
+    if (!validateMask(insideMask, 'insideMask')) {
+      return res.status(400).json({
+        message:
+          'Invalid insideMask format. Expected { width, height, data(base64) } where decoded data length equals width*height.',
+      });
+    }
+
+    if (!validateMask(roiMask, 'roiMask')) {
+      return res.status(400).json({
+        message:
+          'Invalid roiMask format. Expected { width, height, data(base64) } where decoded data length equals width*height.',
+      });
+    }
+
     const updatedConfig = await Config.findOneAndUpdate(
       { userId: req.user._id },
       {
@@ -86,6 +140,9 @@ const upsertConfig = async (req, res, next) => {
         entryLine,
         insideDirection,
         restrictedZones,
+        zoneMask,
+        insideMask,
+        roiMask,
       },
       { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
     );
@@ -96,6 +153,9 @@ const upsertConfig = async (req, res, next) => {
         entryLine: updatedConfig.entryLine,
         insideDirection: updatedConfig.insideDirection,
         restrictedZones: updatedConfig.restrictedZones,
+        zoneMask: updatedConfig.zoneMask || null,
+        insideMask: updatedConfig.insideMask || null,
+        roiMask: updatedConfig.roiMask || null,
       },
     });
   } catch (error) {
