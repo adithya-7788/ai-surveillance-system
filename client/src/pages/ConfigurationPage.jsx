@@ -15,14 +15,17 @@ const ConfigurationPage = () => {
   const [savingConfig, setSavingConfig] = useState(false);
 
   const {
-    mode,
-    setMode,
+    brushMode,
+    setBrushMode,
+    brushSize,
+    setBrushSize,
     config,
     setConfig,
     clearAll,
+    clearInsideMask,
+    clearRoiMask,
     syncCanvasToVideo,
     draw,
-    handleCanvasClick,
     handleMouseDown,
     handleMouseMove,
     handleMouseUp,
@@ -73,9 +76,12 @@ const ConfigurationPage = () => {
       setLoadingConfig(true);
       const { data } = await api.get('/config');
       setConfig({
-        entryLine: data?.entryLine ?? null,
-        insideDirection: data?.insideDirection ?? null,
-        restrictedZones: Array.isArray(data?.restrictedZones) ? data.restrictedZones : [],
+        entryLine: null,
+        insideDirection: null,
+        restrictedZones: [],
+        zoneMask: null,
+        insideMask: data?.insideMask ?? data?.zoneMask ?? null,
+        roiMask: data?.roiMask ?? null,
       });
     } catch (error) {
       setApiStatus({
@@ -93,17 +99,23 @@ const ConfigurationPage = () => {
       setApiStatus({ type: '', message: '' });
 
       const payload = {
-        entryLine: config.entryLine,
-        insideDirection: config.insideDirection,
-        restrictedZones: config.restrictedZones,
+        entryLine: null,
+        insideDirection: null,
+        restrictedZones: [],
+        zoneMask: null,
+        insideMask: config.insideMask,
+        roiMask: config.roiMask,
       };
 
       const { data } = await api.post('/config', payload);
 
       setConfig({
-        entryLine: data?.config?.entryLine ?? null,
-        insideDirection: data?.config?.insideDirection ?? null,
-        restrictedZones: Array.isArray(data?.config?.restrictedZones) ? data.config.restrictedZones : [],
+        entryLine: null,
+        insideDirection: null,
+        restrictedZones: [],
+        zoneMask: null,
+        insideMask: data?.config?.insideMask ?? data?.config?.zoneMask ?? null,
+        roiMask: data?.config?.roiMask ?? null,
       });
 
       setApiStatus({ type: 'success', message: 'Configuration saved successfully.' });
@@ -137,7 +149,7 @@ const ConfigurationPage = () => {
       <div>
         <h2 className="text-2xl font-semibold text-white">Configuration Mode</h2>
         <p className="mt-1 text-slate-400">
-          Draw one Entry/Exit line and multiple restricted zones over the live feed.
+          Paint two zone types: Inside Zone (green) for entry/exit and ROI Zone (red) for suspicious activity.
         </p>
       </div>
 
@@ -160,25 +172,61 @@ const ConfigurationPage = () => {
           </button>
 
           <button
-            onClick={() => setMode('line')}
+            onClick={() => setBrushMode('inside')}
             className={`rounded-xl px-4 py-2 font-medium transition ${
-              mode === 'line'
-                ? 'bg-sky-600 text-white'
+              brushMode === 'inside'
+                ? 'bg-emerald-600 text-white'
                 : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
             }`}
           >
-            Draw Line
+            Paint Inside Zone
           </button>
 
           <button
-            onClick={() => setMode('rectangle')}
+            onClick={() => setBrushMode('roi')}
             className={`rounded-xl px-4 py-2 font-medium transition ${
-              mode === 'rectangle'
-                ? 'bg-sky-600 text-white'
+              brushMode === 'roi' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+            }`}
+          >
+            Paint ROI Zone
+          </button>
+
+          <button
+            onClick={() => setBrushMode('erase')}
+            className={`rounded-xl px-4 py-2 font-medium transition ${
+              brushMode === 'erase'
+                ? 'bg-slate-500 text-white'
                 : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
             }`}
           >
-            Draw Rectangle
+            Erase Zone
+          </button>
+
+          <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950 px-3 py-2">
+            <span className="text-xs text-slate-400">Brush</span>
+            <input
+              type="range"
+              min={2}
+              max={16}
+              value={brushSize}
+              onChange={(event) => setBrushSize(Number(event.target.value))}
+              className="h-2 w-28 accent-sky-500"
+            />
+            <span className="w-6 text-xs text-slate-200">{brushSize}</span>
+          </div>
+
+          <button
+            onClick={clearInsideMask}
+            className="rounded-xl bg-emerald-900/70 px-4 py-2 font-medium text-emerald-100 transition hover:bg-emerald-800"
+          >
+            Clear Inside Zone
+          </button>
+
+          <button
+            onClick={clearRoiMask}
+            className="rounded-xl bg-rose-900/70 px-4 py-2 font-medium text-rose-100 transition hover:bg-rose-800"
+          >
+            Clear ROI Zones
           </button>
 
           <button
@@ -212,7 +260,6 @@ const ConfigurationPage = () => {
           overlayCanvasRef={canvasRef}
           overlayCanvasClassName="cursor-crosshair"
           overlayCanvasProps={{
-            onClick: handleCanvasClick,
             onMouseDown: handleMouseDown,
             onMouseMove: handleMouseMove,
             onMouseUp: handleMouseUp,
@@ -226,30 +273,34 @@ const ConfigurationPage = () => {
 
         <div className="mt-4 grid gap-3 text-sm text-slate-300 md:grid-cols-3">
           <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-            <p className="text-slate-400">Mode</p>
-            <p className="font-medium text-white">{mode === 'line' ? 'Entry/Exit Line' : 'Restricted Zone'}</p>
+            <p className="text-slate-400">Brush Mode</p>
+            <p className="font-medium text-white">
+              {brushMode === 'inside'
+                ? 'Painting Inside Zone'
+                : brushMode === 'roi'
+                  ? 'Painting ROI Zone'
+                  : 'Erasing Both Zones'}
+            </p>
           </div>
           <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-            <p className="text-slate-400">Entry Line</p>
-            <p className="font-medium text-white">{config.entryLine ? 'Configured' : 'Not set'}</p>
+            <p className="text-slate-400">Inside Zone</p>
+            <p className="font-medium text-white">{config.insideMask ? 'Configured' : 'Empty'}</p>
           </div>
           <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-            <p className="text-slate-400">Restricted Zones</p>
-            <p className="font-medium text-white">{config.restrictedZones.length}</p>
+            <p className="text-slate-400">ROI Zone</p>
+            <p className="font-medium text-white">{config.roiMask ? 'Configured' : 'Empty'}</p>
           </div>
         </div>
 
-        {config.entryLine && !config.insideDirection && (
-          <div className="mt-4 rounded-xl border border-amber-900/40 bg-amber-950/40 p-4 text-sm text-amber-200">
-            Click the side of the line that should be treated as <span className="font-semibold">Inside</span>.
-          </div>
-        )}
+        <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-3 text-sm text-slate-300">
+          Mask Resolution: {config.insideMask?.width || config.roiMask?.width || 0} ×{' '}
+          {config.insideMask?.height || config.roiMask?.height || 0}
+        </div>
 
-        {config.entryLine && config.insideDirection && (
-          <div className="mt-4 rounded-xl border border-emerald-900/40 bg-emerald-950/40 p-4 text-sm text-emerald-200">
-            Inside direction is set. Click the line again only if you want to redraw it.
-          </div>
-        )}
+        <div className="mt-4 rounded-xl border border-sky-900/40 bg-sky-950/30 p-4 text-sm text-sky-200">
+          Green = <span className="font-semibold">Inside Zone</span> (entry/exit). Red =
+          <span className="font-semibold"> ROI Zone</span> (suspicious activity). Erase removes from both zones.
+        </div>
       </div>
     </div>
   );

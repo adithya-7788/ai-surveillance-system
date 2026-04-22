@@ -12,6 +12,36 @@ const OBJECT_PLACEMENT_THRESHOLD_MS = 2000; // Object must be stationary for 2 s
 const OBJECT_PLACEMENT_DISTANCE_THRESHOLD = 0.02; // Max distance to consider object stationary
 const OBJECT_PICKUP_CONFIRMATION_FRAMES = 2; // Frames to confirm pickup
 const OBJECT_DEFAULT_INTERACTION_DISTANCE = 0.1; // Default proximity for person-object association
+const ZONE_STATE_STABILITY_FRAMES = 3;
+const ROI_DETECTION_RADIUS = 0.03; // Circular region radius around centroid for ROI detection (normalized coordinates)
+// Helper: Check if any part of a circular region overlaps with ROI mask
+const isInsideROIMask = (centroid, roiMask) => {
+  if (!roiMask) return false;
+
+  const x = clampRelative(centroid.x);
+  const y = clampRelative(centroid.y);
+  const radiusPixels = ROI_DETECTION_RADIUS * roiMask.width; // Convert normalized radius to pixels
+
+  // Check if centroid or nearby pixels overlap with ROI
+  const checkPoints = [
+    { px: x, py: y }, // centroid
+    { px: x - radiusPixels / roiMask.width, py: y }, // left
+    { px: x + radiusPixels / roiMask.width, py: y }, // right
+    { px: x, py: y - radiusPixels / roiMask.height }, // top
+    { px: x, py: y + radiusPixels / roiMask.height }, // bottom
+  ];
+
+  for (const pt of checkPoints) {
+    const px = Math.min(roiMask.width - 1, Math.max(0, Math.floor(pt.px * roiMask.width)));
+    const py = Math.min(roiMask.height - 1, Math.max(0, Math.floor(pt.py * roiMask.height)));
+    const index = py * roiMask.width + px;
+    if (roiMask.data[index] === 1) {
+      return true;
+    }
+  }
+
+  return false;
+};
 
 const alertTitles = {
   entry: 'Person entered',
@@ -20,6 +50,7 @@ const alertTitles = {
   crowd: 'Crowd threshold exceeded',
   restricted_time: 'Restricted time entry',
   suspicious_activity: 'Suspicious Activity Detected',
+  suspicious: 'Suspicious Activity Detected',
 };
 
 const userStateMap = new Map();
@@ -398,11 +429,109 @@ const isInsideMonitoredArea = (point, entryLine, insideDirection, restrictedZone
   return true;
 };
 
-const updateTrackState = ({ state, det, inside, currentSide, now, settings, sideState }) => {
+const decodeZoneMask = (zoneMask) => {
+  if (!zoneMask || typeof zoneMask !== 'object') {
+    return null;
+  }
+
+  const width = Number(zoneMask.width);
+  const height = Number(zoneMask.height);
+  const data = String(zoneMask.data || '');
+
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 || !data) {
+    return null;
+  }
+
+  try {
+    const bytes = Buffer.from(data, 'base64');
+    if (bytes.length !== width * height) {
+      return null;
+    }
+
+    return { width, height, data: bytes };
+  } catch {
+    return null;
+  }
+};
+
+const isInsideZoneMask = (point, zoneMask) => {
+  if (!zoneMask) return null;
+
+  const x = clampRelative(point.x);
+  const y = clampRelative(point.y);
+  const px = Math.min(zoneMask.width - 1, Math.max(0, Math.floor(x * zoneMask.width)));
+  const py = Math.min(zoneMask.height - 1, Math.max(0, Math.floor(y * zoneMask.height)));
+  const index = py * zoneMask.width + px;
+  return zoneMask.data[index] === 1;
+};
+
+const getConfirmedZoneTransition = ({ previousTrack, rawInside, now }) => {
+  const rawSide = rawInside ? 'inside' : 'outside';
+  const stableSide = previousTrack.lastStableSide || null;
+  const previousCandidateSide = previousTrack.candidateSide || null;
+  const previousCandidateFrames = Number(previousTrack.candidateFrames || 0);
+  const previousTransitionAt = Number(previousTrack.lastTransitionTime || 0);
+
+  if (!stableSide) {
+    return {
+      stableSide: rawSide,
+      candidateSide: null,
+      candidateFrames: 0,
+      transitionDirection: null,
+      transitionAt: previousTransitionAt,
+      transitionFrom: null,
+      transitionTo: null,
+      rawSide,
+    };
+  }
+
+  if (rawSide === stableSide) {
+    return {
+      stableSide,
+      candidateSide: null,
+      candidateFrames: 0,
+      transitionDirection: null,
+      transitionAt: previousTransitionAt,
+      transitionFrom: null,
+      transitionTo: null,
+      rawSide,
+    };
+  }
+
+  const nextCandidateFrames = previousCandidateSide === rawSide ? previousCandidateFrames + 1 : 1;
+  const cooldownOk = now - previousTransitionAt >= TRANSITION_COOLDOWN_MS;
+
+  if (nextCandidateFrames < ZONE_STATE_STABILITY_FRAMES || !cooldownOk) {
+    return {
+      stableSide,
+      candidateSide: rawSide,
+      candidateFrames: nextCandidateFrames,
+      transitionDirection: null,
+      transitionAt: previousTransitionAt,
+      transitionFrom: null,
+      transitionTo: null,
+      rawSide,
+    };
+  }
+
+  return {
+    stableSide: rawSide,
+    candidateSide: null,
+    candidateFrames: 0,
+    transitionDirection: stableSide === 'outside' ? 'entry' : 'exit',
+    transitionAt: now,
+    transitionFrom: stableSide,
+    transitionTo: rawSide,
+    rawSide,
+  };
+};
+
+const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, settings, sideState }) => {
   const trackId = Number(det.id);
   const previous = state.trackMemory.get(trackId) || {};
-  const loiteringThresholdSeconds = Number(settings?.loiteringTimeThreshold ?? settings?.loiteringTime ?? 0);
+  const loiteringThresholdSeconds = Number(settings?.loiteringThreshold ?? 60);
   const loiteringThresholdMs = loiteringThresholdSeconds * 1000;
+  const suspiciousInteractionThresholdSeconds = Number(settings?.suspiciousInteractionTimeThreshold ?? 20);
 
   const nextTrack = {
     lastPosition: { x: det.cx, y: det.cy },
@@ -415,10 +544,16 @@ const updateTrackState = ({ state, det, inside, currentSide, now, settings, side
     lastTransitionSide: sideState.transitionTo || previous.lastTransitionSide || null,
     lastSide: currentSide,
     inside,
+    roiInside: Boolean(roiInside),
     lastSeenAt: now,
+    firstSeenAt: previous.firstSeenAt || now,
     insideSinceAt: previous.insideSinceAt ?? (inside ? now : null),
+    roiInsideSinceAt: previous.roiInsideSinceAt ?? (roiInside ? now : null),
     loiteringAlertKey: previous.loiteringAlertKey || null,
     loiteringDurationSeconds: previous.loiteringDurationSeconds || 0,
+    suspiciousAlertKey: previous.suspiciousAlertKey || null,
+    zoneDurationSeconds: previous.zoneDurationSeconds || 0,
+    roiDurationSeconds: previous.roiDurationSeconds || 0,
   };
 
   if (inside && !previous.insideSinceAt) {
@@ -427,19 +562,55 @@ const updateTrackState = ({ state, det, inside, currentSide, now, settings, side
 
   if (!inside) {
     nextTrack.insideSinceAt = null;
-    nextTrack.loiteringDurationSeconds = 0;
-    if (previous.loiteringAlertKey) {
-      resolveAlert(state, previous.loiteringAlertKey, { reason: 'person left monitored area' });
-      nextTrack.loiteringAlertKey = null;
+    nextTrack.zoneDurationSeconds = 0;
+  }
+
+  if (!roiInside) {
+    nextTrack.roiInsideSinceAt = null;
+    nextTrack.roiDurationSeconds = 0;
+    if (previous.suspiciousAlertKey) {
+      resolveAlert(state, previous.suspiciousAlertKey, {
+        reason: 'person left ROI zone',
+        personId: trackId,
+      });
+      nextTrack.suspiciousAlertKey = null;
     }
   }
 
-  if (inside && loiteringThresholdMs > 0) {
+  if (inside) {
     const insideSinceAt = nextTrack.insideSinceAt || now;
-    const durationSeconds = Math.max(0, Math.floor((now - insideSinceAt) / 1000));
+    const zoneDurationSeconds = Math.max(0, Math.floor((now - insideSinceAt) / 1000));
+    nextTrack.zoneDurationSeconds = zoneDurationSeconds;
+  }
+
+  if (roiInside) {
+    const roiInsideSinceAt = nextTrack.roiInsideSinceAt || now;
+    const roiDurationSeconds = Math.max(0, Math.floor((now - roiInsideSinceAt) / 1000));
+    nextTrack.roiDurationSeconds = roiDurationSeconds;
+
+    if (roiDurationSeconds >= suspiciousInteractionThresholdSeconds) {
+      const suspiciousAlertKey = previous.suspiciousAlertKey || getStateKey('suspicious', `${trackId}:${roiInsideSinceAt}`);
+      nextTrack.suspiciousAlertKey = suspiciousAlertKey;
+
+      createStatefulAlert(state, {
+        alertKey: suspiciousAlertKey,
+        type: 'suspicious',
+        personId: trackId,
+        metadata: {
+          personId: trackId,
+          duration: roiDurationSeconds,
+          reason: 'prolonged interaction inside ROI zone',
+        },
+      });
+    }
+  }
+
+  if (loiteringThresholdMs > 0) {
+    const firstSeenAt = nextTrack.firstSeenAt || now;
+    const durationSeconds = Math.max(0, Math.floor((now - firstSeenAt) / 1000));
 
     if (durationSeconds >= loiteringThresholdSeconds) {
-      const alertKey = previous.loiteringAlertKey || getStateKey('loitering', `${trackId}:${insideSinceAt}`);
+      const alertKey = previous.loiteringAlertKey || getStateKey('loitering', `${trackId}:${firstSeenAt}`);
       nextTrack.loiteringAlertKey = alertKey;
       nextTrack.loiteringDurationSeconds = durationSeconds;
 
@@ -450,7 +621,7 @@ const updateTrackState = ({ state, det, inside, currentSide, now, settings, side
         metadata: {
           duration: durationSeconds,
           personId: trackId,
-          reason: 'person remained in monitored area',
+          reason: 'person remained in view for extended duration',
         },
       });
     }
@@ -461,7 +632,7 @@ const updateTrackState = ({ state, det, inside, currentSide, now, settings, side
 };
 
 const updateCrowdAlert = (state, settings, now, currentCount) => {
-  const crowdThreshold = Number(settings?.crowdThreshold || 0);
+  const crowdThreshold = Number(settings?.crowdThreshold ?? 10);
 
   if (crowdThreshold > 0 && currentCount > crowdThreshold) {
     if (!state.crowdAlertKey) {
@@ -487,8 +658,7 @@ const updateCrowdAlert = (state, settings, now, currentCount) => {
 
 const updateSuspiciousActivity = ({ state, objects, settings, entryLine, insideDirection, restrictedZones, now, personDetections }) => {
   const allowedObjects = ['backpack', 'handbag', 'suitcase'];
-  const monitoredClasses = new Set((settings?.monitoredObjectClasses || []).map((item) => String(item).toLowerCase()));
-  const objectDisappearanceThreshold = Number(settings?.objectDisappearanceFrameThreshold || 10);
+  const objectDisappearanceThreshold = 10;
   const interactionDistance = Number(settings?.objectInteractionDistanceThreshold || OBJECT_DEFAULT_INTERACTION_DISTANCE);
   
   // Filter objects to only allowed types
@@ -678,69 +848,82 @@ const updateStateWithFrame = ({
   settings,
   restrictedZones = [],
   objectObservations = [],
+  zoneMask = null,
+  insideMask = null,
+  roiMask = null,
 }) => {
   cleanupUserStates();
   const state = getOrCreateState(userId);
   const now = Date.now();
 
-  // Filter detections to only persons for tracking
+  const decodedInsideMask = decodeZoneMask(insideMask || zoneMask);
+  const decodedROIMask = decodeZoneMask(roiMask);
+  const detectionAnnotations = {};
+
   const personDetections = detections.filter((det) => det.class === 'person');
-  const allDetections = detections; // Keep all for passing to updateSuspiciousActivity
+  const allDetections = detections;
 
   for (const [trackId, track] of state.trackMemory.entries()) {
     if (now - track.lastSeenAt > TRACK_STALE_MS) {
       if (track.loiteringAlertKey) {
-        resolveAlert(state, track.loiteringAlertKey, { reason: 'person left monitored area' });
+        resolveAlert(state, track.loiteringAlertKey, { reason: 'person left frame' });
       }
-
+      if (track.suspiciousAlertKey) {
+        resolveAlert(state, track.suspiciousAlertKey, { reason: 'person left frame' });
+      }
       state.trackMemory.delete(trackId);
     }
   }
 
   for (const det of personDetections) {
     const trackId = Number(det.id);
-    if (!Number.isFinite(trackId)) {
-      continue;
-    }
+    if (!Number.isFinite(trackId)) continue;
 
     const centroid = { x: det.cx, y: det.cy };
     const previous = state.trackMemory.get(trackId) || {};
-    const currentSide = entryLine ? lineSide(centroid, entryLine) : undefined;
-    const rawSide = entryLine ? classifySideByLine(currentSide, insideDirection) : 'unknown';
-    const sideState = entryLine
-      ? getConfirmedTransition({
-          previousTrack: previous,
-          rawSide,
-          now,
-        })
-      : {
-          stableSide: null,
-          candidateSide: null,
-          candidateFrames: 0,
-          transitionDirection: null,
-          transitionAt: previous.lastTransitionTime || 0,
-          transitionFrom: null,
-          transitionTo: null,
-          rawSide,
-        };
 
-    const inside = entryLine
+    const insideByMask = decodedInsideMask ? isInsideZoneMask(centroid, decodedInsideMask) : null;
+    const roiInside = decodedROIMask ? isInsideROIMask(centroid, decodedROIMask) : false;
+
+    const currentSide = entryLine ? lineSide(centroid, entryLine) : undefined;
+    const sideState = decodedInsideMask
+      ? getConfirmedZoneTransition({ previousTrack: previous, rawInside: Boolean(insideByMask), now })
+      : entryLine
+        ? getConfirmedTransition({
+            previousTrack: previous,
+            rawSide: classifySideByLine(currentSide, insideDirection),
+            now,
+          })
+        : {
+            stableSide: null,
+            candidateSide: null,
+            candidateFrames: 0,
+            transitionDirection: null,
+            transitionAt: previous.lastTransitionTime || 0,
+            transitionFrom: null,
+            transitionTo: null,
+            rawSide: 'unknown',
+          };
+
+    const inside = decodedInsideMask
       ? sideState.stableSide === 'inside'
-      : isInsideMonitoredArea(centroid, entryLine, insideDirection, restrictedZones);
+      : entryLine
+        ? sideState.stableSide === 'inside'
+        : isInsideMonitoredArea(centroid, entryLine, insideDirection, restrictedZones);
 
     const nextTrack = updateTrackState({
       state,
       det,
       inside,
+      roiInside,
       currentSide,
       now,
       settings,
       sideState,
     });
 
-    const direction = entryLine ? sideState.transitionDirection : null;
-
-    if (direction === 'entry') {
+    const effectiveDirection = sideState.transitionDirection;
+    if (effectiveDirection === 'entry') {
       state.stats.entries += 1;
       createEventAlert(state, {
         type: 'entry',
@@ -761,7 +944,7 @@ const updateStateWithFrame = ({
           reason: 'entry occurred during restricted time window',
         });
       }
-    } else if (direction === 'exit') {
+    } else if (effectiveDirection === 'exit') {
       state.stats.exits += 1;
       createEventAlert(state, {
         type: 'exit',
@@ -769,6 +952,13 @@ const updateStateWithFrame = ({
         metadata: { personId: trackId },
       });
     }
+
+    detectionAnnotations[trackId] = {
+      zoneInside: Boolean(nextTrack.inside),
+      zoneDurationSeconds: Number(nextTrack.zoneDurationSeconds || 0),
+      roiInside: Boolean(nextTrack.roiInside),
+      roiDurationSeconds: Number(nextTrack.roiDurationSeconds || 0),
+    };
 
     state.trackMemory.set(trackId, nextTrack);
   }
@@ -784,7 +974,7 @@ const updateStateWithFrame = ({
     insideDirection,
     restrictedZones,
     now,
-    personDetections: personDetections,
+    personDetections,
   });
 
   state.updatedAt = now;
@@ -796,6 +986,7 @@ const updateStateWithFrame = ({
     stats: state.stats,
     alerts: state.alertFeed.slice(0, MAX_ALERTS),
     changes,
+    detectionAnnotations,
   };
 };
 

@@ -2,31 +2,12 @@ const Settings = require('../models/Settings');
 
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
-const normalizeMonitoredObjectClasses = (value) => {
-  if (!value) return [];
-
-  if (Array.isArray(value)) {
-    return value.map((item) => String(item).trim()).filter(Boolean);
-  }
-
-  if (typeof value === 'string') {
-    return value
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
-
-  return [];
-};
-
 const toSettingsResponse = (settings) => ({
-  crowdThreshold: settings.crowdThreshold,
-  loiteringTimeThreshold: settings.loiteringTimeThreshold ?? settings.loiteringTime ?? 60,
-  loiteringTime: settings.loiteringTimeThreshold ?? settings.loiteringTime ?? 60,
-  disappearanceFrameThreshold: settings.disappearanceFrameThreshold ?? 5,
+  suspiciousInteractionTimeThreshold: settings.suspiciousInteractionTimeThreshold ?? 20,
+  crowdThreshold: settings.crowdThreshold ?? 10,
+  loiteringThreshold: settings.loiteringThreshold ?? 60,
   restrictedStartTime: settings.restrictedStartTime,
   restrictedEndTime: settings.restrictedEndTime,
-  monitoredObjectClasses: settings.monitoredObjectClasses,
 });
 
 const getSettings = async (req, res, next) => {
@@ -35,13 +16,11 @@ const getSettings = async (req, res, next) => {
 
     if (!settings) {
       return res.status(200).json({
+        suspiciousInteractionTimeThreshold: 20,
         crowdThreshold: 10,
-        loiteringTimeThreshold: 60,
-        loiteringTime: 60,
-        disappearanceFrameThreshold: 5,
+        loiteringThreshold: 60,
         restrictedStartTime: '00:00',
         restrictedEndTime: '00:00',
-        monitoredObjectClasses: [],
       });
     }
 
@@ -54,47 +33,40 @@ const getSettings = async (req, res, next) => {
 const upsertSettings = async (req, res, next) => {
   try {
     const {
-      crowdThreshold,
-      loiteringTimeThreshold,
-      loiteringTime,
-      disappearanceFrameThreshold,
+      suspiciousInteractionTimeThreshold = 20,
+      crowdThreshold = 10,
+      loiteringThreshold = 60,
       restrictedStartTime = '00:00',
       restrictedEndTime = '00:00',
-      monitoredObjectClasses = [],
     } = req.body || {};
 
-    const normalizedLoiteringTime = Number.isInteger(loiteringTimeThreshold)
-      ? loiteringTimeThreshold
-      : loiteringTime;
+    if (!Number.isInteger(suspiciousInteractionTimeThreshold) || suspiciousInteractionTimeThreshold < 1) {
+      return res
+        .status(400)
+        .json({ message: 'suspiciousInteractionTimeThreshold must be a positive integer in seconds.' });
+    }
 
     if (!Number.isInteger(crowdThreshold) || crowdThreshold < 1) {
       return res.status(400).json({ message: 'crowdThreshold must be a positive integer.' });
     }
 
-    if (!Number.isInteger(normalizedLoiteringTime) || normalizedLoiteringTime < 1) {
-      return res.status(400).json({ message: 'loiteringTimeThreshold must be a positive integer in seconds.' });
-    }
-
-    if (!Number.isInteger(disappearanceFrameThreshold) || disappearanceFrameThreshold < 1) {
-      return res.status(400).json({ message: 'disappearanceFrameThreshold must be a positive integer.' });
+    if (!Number.isInteger(loiteringThreshold) || loiteringThreshold < 1) {
+      return res.status(400).json({ message: 'loiteringThreshold must be a positive integer in seconds.' });
     }
 
     if (!TIME_REGEX.test(restrictedStartTime) || !TIME_REGEX.test(restrictedEndTime)) {
       return res.status(400).json({ message: 'Restricted entry time must use HH:MM format.' });
     }
 
-    const normalizedObjectClasses = normalizeMonitoredObjectClasses(monitoredObjectClasses);
-
     const updatedSettings = await Settings.findOneAndUpdate(
       { userId: req.user._id },
       {
         userId: req.user._id,
+        suspiciousInteractionTimeThreshold,
         crowdThreshold,
-        loiteringTimeThreshold: normalizedLoiteringTime,
-        disappearanceFrameThreshold,
+        loiteringThreshold,
         restrictedStartTime,
         restrictedEndTime,
-        monitoredObjectClasses: normalizedObjectClasses,
       },
       { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
     );

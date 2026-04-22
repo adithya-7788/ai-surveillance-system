@@ -20,6 +20,15 @@ const restrictedZoneSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const maskSchema = new mongoose.Schema(
+  {
+    width: { type: Number, min: 16, max: 512, required: true },
+    height: { type: Number, min: 16, max: 512, required: true },
+    data: { type: String, required: true },
+  },
+  { _id: false }
+);
+
 const configSchema = new mongoose.Schema(
   {
     userId: {
@@ -41,6 +50,18 @@ const configSchema = new mongoose.Schema(
     restrictedZones: {
       type: [restrictedZoneSchema],
       default: [],
+    },
+    zoneMask: {
+      type: maskSchema,
+      default: null,
+    },
+    insideMask: {
+      type: maskSchema,
+      default: null,
+    },
+    roiMask: {
+      type: maskSchema,
+      default: null,
     },
   },
   { timestamps: true }

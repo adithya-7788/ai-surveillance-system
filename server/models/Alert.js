@@ -15,7 +15,7 @@ const alertSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['entry', 'exit', 'loitering', 'crowd', 'restricted_time', 'suspicious_activity'],
+      enum: ['entry', 'exit', 'loitering', 'crowd', 'restricted_time', 'suspicious_activity', 'suspicious'],
       required: true,
       index: true,
     },

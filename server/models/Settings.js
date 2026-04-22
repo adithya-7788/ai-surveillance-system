@@ -9,22 +9,22 @@ const settingsSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    suspiciousInteractionTimeThreshold: {
+      type: Number,
+      min: 1,
+      default: 20,
+      required: true,
+    },
     crowdThreshold: {
       type: Number,
       min: 1,
       default: 10,
       required: true,
     },
-    loiteringTimeThreshold: {
+    loiteringThreshold: {
       type: Number,
       min: 1,
       default: 60,
-      required: true,
-    },
-    disappearanceFrameThreshold: {
-      type: Number,
-      min: 1,
-      default: 5,
       required: true,
     },
     restrictedStartTime: {
@@ -35,22 +35,6 @@ const settingsSchema = new mongoose.Schema(
     restrictedEndTime: {
       type: String,
       default: '00:00',
-      required: true,
-    },
-    monitoredObjectClasses: {
-      type: [String],
-      default: [],
-    },
-    objectInteractionDistanceThreshold: {
-      type: Number,
-      min: 0.01,
-      default: 0.1,
-      required: true,
-    },
-    objectDisappearanceFrameThreshold: {
-      type: Number,
-      min: 1,
-      default: 10,
       required: true,
     },
   },
