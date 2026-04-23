@@ -1,3 +1,5 @@
+const { sendAlertNotifications } = require('./notificationService');
+
 const USER_STATE_TTL_MS = 1000 * 60 * 60;
 const TRACK_STALE_MS = 15000;
 const SIDE_EPSILON = 0.003;
@@ -411,7 +413,7 @@ const queueAlertChange = (state, alert) => {
   state.pendingAlertChanges.set(alert.alertKey, alert);
 };
 
-const upsertAlert = (state, nextAlert) => {
+const upsertAlert = (state, nextAlert, userId) => {
   const existing = state.alertsByKey.get(nextAlert.alertKey);
   const now = Date.now();
   const status = nextAlert.status || existing?.status || 'active';
@@ -451,12 +453,21 @@ const upsertAlert = (state, nextAlert) => {
     state.alertsByKey.set(merged.alertKey, merged);
   }
   console.log('ALERT CREATED:', merged.alertKey, merged.changeType);
+  
+  // Send notifications for newly created alerts
+  if (merged.changeType === 'created' && userId) {
+    // Send notifications asynchronously without blocking
+    sendAlertNotifications(userId, merged).catch(error => {
+      console.error('Failed to send notifications for alert', merged.alertKey, ':', error.message);
+    });
+  }
+  
   queueAlertChange(state, merged);
   refreshFeed(state);
   return merged;
 };
 
-const createEventAlert = (state, { type, personId = null, objectType = null, metadata = {}, reason = null, alertKey = null, status = 'active', startTime = null, resolvedAt = null }) => {
+const createEventAlert = (state, { type, personId = null, objectType = null, metadata = {}, reason = null, alertKey = null, status = 'active', startTime = null, resolvedAt = null }, userId) => {
   const derivedAlertKey =
     alertKey ||
     (Number.isFinite(Number(personId)) ? getStateKey(type, Number(personId)) : getStateKey(type, 'global'));
@@ -480,10 +491,10 @@ const createEventAlert = (state, { type, personId = null, objectType = null, met
       ...(objectType ? { objectType } : {}),
     },
     resolvedAt,
-  });
+  }, userId);
 };
 
-const createStatefulAlert = (state, { alertKey, type, personId = null, objectType = null, metadata = {} }) => {
+const createStatefulAlert = (state, { alertKey, type, personId = null, objectType = null, metadata = {} }, userId) => {
   const now = Date.now();
   return upsertAlert(state, {
     alertKey,
@@ -496,10 +507,10 @@ const createStatefulAlert = (state, { alertKey, type, personId = null, objectTyp
     personId,
     objectType,
     metadata,
-  });
+  }, userId);
 };
 
-const resolveAlert = (state, alertKey, metadata = {}) => {
+const resolveAlert = (state, alertKey, metadata = {}, userId) => {
   const existing = state.alertsByKey.get(alertKey);
   if (!existing || existing.status === 'resolved') {
     return existing || null;
@@ -525,7 +536,7 @@ const resolveAlert = (state, alertKey, metadata = {}) => {
     snapshotPath: existing.snapshotPath || null,
     resolvedAt: Date.now(),
     timestamp: Date.now(),
-  });
+  }, userId);
 };
 
 const isPointInZone = (point, zone) => {
@@ -647,7 +658,7 @@ const getConfirmedZoneTransition = ({ previousTrack, rawInside, now }) => {
   };
 };
 
-const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, settings, sideState }) => {
+const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, settings, sideState, userId }) => {
   const trackId = Number(det.id);
   const previous = state.trackMemory.get(trackId) || {};
   const loiteringThresholdSeconds = Number(settings?.loiteringThreshold ?? 60);
@@ -693,7 +704,7 @@ const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, set
       resolveAlert(state, previous.suspiciousAlertKey, {
         reason: 'person left ROI zone',
         personId: trackId,
-      });
+      }, userId);
       nextTrack.suspiciousAlertKey = null;
     }
   }
@@ -722,7 +733,7 @@ const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, set
           duration: roiDurationSeconds,
           reason: 'prolonged interaction inside ROI zone',
         },
-      });
+      }, userId);
     }
   }
 
@@ -744,7 +755,7 @@ const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, set
           personId: trackId,
           reason: 'person remained in view for extended duration',
         },
-      });
+      }, userId);
     }
   }
 
@@ -752,7 +763,7 @@ const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, set
   return nextTrack;
 };
 
-const updateCrowdAlert = (state, settings, now, currentCount) => {
+const updateCrowdAlert = (state, settings, now, currentCount, userId) => {
   const crowdThreshold = Number(settings?.crowdThreshold ?? 10);
 
   if (crowdThreshold > 0 && currentCount > crowdThreshold) {
@@ -767,17 +778,17 @@ const updateCrowdAlert = (state, settings, now, currentCount) => {
         count: currentCount,
         reason: 'count exceeded configured crowd threshold',
       },
-    });
+    }, userId);
   } else if (state.crowdAlertKey) {
     resolveAlert(state, state.crowdAlertKey, {
       count: currentCount,
       reason: 'count returned below crowd threshold',
-    });
+    }, userId);
     state.crowdAlertKey = null;
   }
 };
 
-const updateSuspiciousActivity = ({ state, objects, settings, entryLine, insideDirection, restrictedZones, now, personDetections }) => {
+const updateSuspiciousActivity = ({ state, objects, settings, entryLine, insideDirection, restrictedZones, now, personDetections, userId }) => {
   const allowedObjects = ['backpack', 'handbag', 'suitcase'];
   const objectDisappearanceThreshold = 10;
   const interactionDistance = Number(settings?.objectInteractionDistanceThreshold || OBJECT_DEFAULT_INTERACTION_DISTANCE);
@@ -910,7 +921,7 @@ const updateSuspiciousActivity = ({ state, objects, settings, entryLine, insideD
             reason: 'Object exited monitored area',
           },
           reason: 'Object exited monitored area',
-        });
+        }, userId);
         nextState.alertTriggered = true;
         nextState.state = 'resolved';
       }
@@ -952,7 +963,7 @@ const updateSuspiciousActivity = ({ state, objects, settings, entryLine, insideD
           missingFrames,
         },
         reason: 'Object disappeared after pickup',
-      });
+      }, userId);
       nextState.alertTriggered = true;
       nextState.state = 'resolved';
     }
@@ -987,16 +998,16 @@ const updateStateWithFrame = ({
   for (const [trackId, track] of state.trackMemory.entries()) {
     if (now - track.lastSeenAt > TRACK_STALE_MS) {
       if (track.loiteringAlertKey) {
-        resolveAlert(state, track.loiteringAlertKey, { reason: 'person left frame' });
+        resolveAlert(state, track.loiteringAlertKey, { reason: 'person left frame' }, userId);
       }
       if (track.suspiciousAlertKey) {
-        resolveAlert(state, track.suspiciousAlertKey, { reason: 'person left frame' });
+        resolveAlert(state, track.suspiciousAlertKey, { reason: 'person left frame' }, userId);
       }
       state.entrySessionsByPerson.delete(trackId);
       resolveAlert(state, getPersonAlertKey('restricted_time', trackId), {
         personId: trackId,
         reason: 'person left frame',
-      });
+      }, userId);
       state.trackMemory.delete(trackId);
     }
   }
@@ -1046,6 +1057,7 @@ const updateStateWithFrame = ({
       now,
       settings,
       sideState,
+      userId,
     });
 
     const effectiveDirection = sideState.transitionDirection;
@@ -1068,7 +1080,7 @@ const updateStateWithFrame = ({
             reason: 'entry occurred during restricted time window',
           },
           reason: 'entry occurred during restricted time window',
-        });
+        }, userId);
       }
     } else if (effectiveDirection === 'exit') {
       state.stats.exits += 1;
@@ -1087,14 +1099,14 @@ const updateStateWithFrame = ({
             duration: sessionDuration,
             reason: 'person session completed from entry to exit',
           },
-        });
+        }, userId);
         state.entrySessionsByPerson.delete(trackId);
       }
 
       resolveAlert(state, getPersonAlertKey('restricted_time', trackId), {
         personId: trackId,
         reason: 'person exited monitored area',
-      });
+      }, userId);
     }
 
     detectionAnnotations[trackId] = {
@@ -1109,7 +1121,7 @@ const updateStateWithFrame = ({
 
   state.stats.current = personDetections.length;
 
-  updateCrowdAlert(state, settings, now, state.stats.current);
+  updateCrowdAlert(state, settings, now, state.stats.current, userId);
   updateSuspiciousActivity({
     state,
     objects: allDetections,
@@ -1119,6 +1131,7 @@ const updateStateWithFrame = ({
     restrictedZones,
     now,
     personDetections,
+    userId,
   });
 
   state.updatedAt = now;
