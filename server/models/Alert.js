@@ -15,7 +15,16 @@ const alertSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['entry', 'exit', 'loitering', 'crowd', 'restricted_time', 'suspicious_activity', 'suspicious'],
+      enum: [
+        'entry',
+        'exit',
+        'entry_exit_session',
+        'loitering',
+        'crowd',
+        'restricted_time',
+        'suspicious_activity',
+        'suspicious',
+      ],
       required: true,
       index: true,
     },
@@ -34,6 +43,26 @@ const alertSchema = new mongoose.Schema(
       default: 'active',
       index: true,
     },
+    priority: {
+      type: String,
+      enum: ['high', 'medium', 'low', 'info'],
+      default: 'low',
+      index: true,
+    },
+    startTime: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
+    lastUpdatedTime: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
+    duration: {
+      type: Number,
+      default: 0,
+    },
     personId: {
       type: Number,
       default: null,
@@ -45,6 +74,10 @@ const alertSchema = new mongoose.Schema(
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
+    },
+    snapshotPath: {
+      type: String,
+      default: null,
     },
     resolvedAt: {
       type: Date,

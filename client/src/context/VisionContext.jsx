@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
-import { mergeAlertsById } from '../utils/alertUtils';
+import { mergeAlertCollections } from '../utils/alertUtils';
 
 const VisionContext = createContext(null);
 
@@ -9,6 +9,8 @@ const INITIAL_STATS = { entries: 0, exits: 0, current: 0 };
 export const VisionProvider = ({ children }) => {
   const [stats, setStats] = useState(INITIAL_STATS);
   const [alerts, setAlerts] = useState([]);
+  const [activeAlerts, setActiveAlerts] = useState([]);
+  const [alertHistory, setAlertHistory] = useState([]);
 
   const updateFromFrame = useCallback((payload) => {
     if (payload?.stats) {
@@ -19,9 +21,15 @@ export const VisionProvider = ({ children }) => {
       });
     }
 
-    if (Array.isArray(payload?.alerts)) {
-      setAlerts((previousAlerts) => mergeAlertsById(previousAlerts, payload.alerts));
-    }
+    setAlerts((previousAlerts) =>
+      mergeAlertCollections({ alerts: previousAlerts }, payload).alerts
+    );
+    setActiveAlerts((previousAlerts) =>
+      mergeAlertCollections({ activeAlerts: previousAlerts }, payload).activeAlerts
+    );
+    setAlertHistory((previousAlerts) =>
+      mergeAlertCollections({ alertHistory: previousAlerts }, payload).alertHistory
+    );
   }, []);
 
   const refreshSummary = useCallback(async () => {
@@ -29,6 +37,8 @@ export const VisionProvider = ({ children }) => {
     if (!token) {
       setStats(INITIAL_STATS);
       setAlerts([]);
+      setActiveAlerts([]);
+      setAlertHistory([]);
       return;
     }
 
@@ -40,9 +50,15 @@ export const VisionProvider = ({ children }) => {
 
       updateFromFrame(summaryResponse.data);
 
-      if (Array.isArray(alertsResponse.data?.alerts)) {
-        setAlerts((previousAlerts) => mergeAlertsById(previousAlerts, alertsResponse.data.alerts));
-      }
+      setAlerts((previousAlerts) =>
+        mergeAlertCollections({ alerts: previousAlerts }, alertsResponse.data || {}).alerts
+      );
+      setActiveAlerts((previousAlerts) =>
+        mergeAlertCollections({ activeAlerts: previousAlerts }, alertsResponse.data || {}).activeAlerts
+      );
+      setAlertHistory((previousAlerts) =>
+        mergeAlertCollections({ alertHistory: previousAlerts }, alertsResponse.data || {}).alertHistory
+      );
     } catch {
       // Keep last known values for graceful UX on transient failures.
     }
@@ -58,8 +74,8 @@ export const VisionProvider = ({ children }) => {
   }, [refreshSummary]);
 
   const value = useMemo(
-    () => ({ stats, alerts, updateFromFrame, refreshSummary }),
-    [alerts, refreshSummary, stats, updateFromFrame]
+    () => ({ stats, alerts, activeAlerts, alertHistory, updateFromFrame, refreshSummary }),
+    [activeAlerts, alertHistory, alerts, refreshSummary, stats, updateFromFrame]
   );
 
   return <VisionContext.Provider value={value}>{children}</VisionContext.Provider>;

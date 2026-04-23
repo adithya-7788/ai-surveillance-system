@@ -1,6 +1,7 @@
 const Config = require('../models/Config');
 const Settings = require('../models/Settings');
 const Alert = require('../models/Alert');
+const { scheduleSnapshotsForAlerts } = require('../services/alertSnapshotService');
 const { runVisionDetection } = require('../services/visionService');
 const {
   toRelativeDetections,
@@ -11,18 +12,32 @@ const {
 
 const inFlightUsers = new Set();
 const latestFrameResponseByUser = new Map();
+const PRIORITY_SCORE = { high: 4, medium: 3, low: 2, info: 1 };
+const SNAPSHOT_ELIGIBLE_TYPES = new Set([
+  'suspicious',
+  'suspicious_activity',
+  'loitering',
+  'entry',
+  'exit',
+  'entry_exit_session',
+]);
 
 const serializeAlert = (alert) => ({
-  id: alert._id.toString(),
+  id: alert.alertKey,
   alertKey: alert.alertKey,
   type: alert.type,
   title: alert.title,
   timestamp: alert.timestamp.toISOString(),
   time: formatISTDateTime(alert.timestamp),
   status: alert.status,
+  priority: alert.priority || 'low',
+  startTime: alert.startTime ? alert.startTime.toISOString() : alert.timestamp.toISOString(),
+  lastUpdatedTime: alert.lastUpdatedTime ? alert.lastUpdatedTime.toISOString() : alert.timestamp.toISOString(),
+  duration: Number(alert.duration || 0),
   personId: alert.personId ?? null,
   objectType: alert.objectType ?? null,
   metadata: alert.metadata || {},
+  snapshotPath: alert.snapshotPath || null,
   resolvedAt: alert.resolvedAt ? alert.resolvedAt.toISOString() : null,
 });
 
@@ -42,9 +57,14 @@ const persistAlertChanges = async (userId, changes) => {
           title: alert.title,
           timestamp: new Date(alert.timestamp),
           status: alert.status,
+          priority: alert.priority || 'low',
+          startTime: alert.startTime ? new Date(alert.startTime) : new Date(alert.timestamp),
+          lastUpdatedTime: alert.lastUpdatedTime ? new Date(alert.lastUpdatedTime) : new Date(alert.timestamp),
+          duration: Number(alert.duration || 0),
           personId: alert.personId ?? null,
           objectType: alert.objectType ?? null,
           metadata: alert.metadata || {},
+          snapshotPath: alert.snapshotPath || null,
           resolvedAt: alert.resolvedAt ? new Date(alert.resolvedAt) : null,
         },
         { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
@@ -130,6 +150,76 @@ const isBase64Image = (value) => {
   return /^[A-Za-z0-9+/=\r\n]+$/.test(base64Body);
 };
 
+const toFramePayload = (imageValue) => {
+  if (!isBase64Image(imageValue)) {
+    return null;
+  }
+
+  const [header, rawBody] = imageValue.includes(',')
+    ? imageValue.split(',', 2)
+    : ['data:image/jpeg;base64', imageValue];
+  const mimeType = header.match(/data:(.*);base64/)?.[1] || 'image/jpeg';
+  const base64 = String(rawBody || '').replace(/\s/g, '');
+  if (!base64) return null;
+
+  try {
+    return {
+      mimeType,
+      base64,
+      buffer: Buffer.from(base64, 'base64'),
+    };
+  } catch {
+    return null;
+  }
+};
+
+const hydrateSnapshotPaths = async (userId, payload = {}) => {
+  const attachableSections = ['alerts', 'activeAlerts', 'alertHistory'];
+  const keySet = new Set();
+
+  for (const section of attachableSections) {
+    const items = Array.isArray(payload[section]) ? payload[section] : [];
+    for (const item of items) {
+      if (
+        item?.alertKey &&
+        !item?.snapshotPath &&
+        SNAPSHOT_ELIGIBLE_TYPES.has(item?.type)
+      ) {
+        keySet.add(item.alertKey);
+      }
+    }
+  }
+
+  if (keySet.size === 0) {
+    return payload;
+  }
+
+  const rows = await Alert.find({
+    userId,
+    alertKey: { $in: Array.from(keySet) },
+    snapshotPath: { $ne: null },
+  })
+    .select('alertKey snapshotPath')
+    .lean();
+
+  if (!rows.length) {
+    return payload;
+  }
+
+  const snapshotByKey = new Map(rows.map((row) => [row.alertKey, row.snapshotPath]));
+  const nextPayload = { ...payload };
+
+  for (const section of attachableSections) {
+    const items = Array.isArray(nextPayload[section]) ? nextPayload[section] : [];
+    nextPayload[section] = items.map((item) => ({
+      ...item,
+      snapshotPath: item.snapshotPath || snapshotByKey.get(item.alertKey) || null,
+    }));
+  }
+
+  return nextPayload;
+};
+
 const postVisionFrame = async (req, res, next) => {
   const userId = String(req.user._id);
 
@@ -149,8 +239,9 @@ const postVisionFrame = async (req, res, next) => {
 
   try {
     const { image } = req.body || {};
+    const frame = toFramePayload(image);
 
-    if (!isBase64Image(image)) {
+    if (!frame) {
       return res.status(400).json({ message: 'Invalid image payload. Expected base64 image string.' });
     }
 
@@ -191,7 +282,7 @@ const postVisionFrame = async (req, res, next) => {
 
     await persistAlertChanges(userId, state.changes);
 
-    const responsePayload = {
+    let responsePayload = {
       detections: relativeDetections.map(({ cx, cy, ...rest }) => {
         const annotations = detectionAnnotations[String(rest.id)] || detectionAnnotations[Number(rest.id)] || {};
         return {
@@ -204,10 +295,27 @@ const postVisionFrame = async (req, res, next) => {
       }),
       stats: state.stats,
       alerts: state.alerts.slice(0, 20),
+      activeAlerts: state.activeAlerts.slice(0, 20),
+      alertHistory: state.alertHistory.slice(0, 20),
       dropped: false,
     };
+    responsePayload = await hydrateSnapshotPaths(userId, responsePayload);
 
     latestFrameResponseByUser.set(userId, responsePayload);
+
+    const createdAlerts = (state.changes || []).filter(
+      (alert) =>
+        true &&
+        !alert?.snapshotPath &&
+        ['suspicious', 'suspicious_activity', 'loitering', 'entry', 'exit', 'entry_exit_session'].includes(alert?.type)
+    );
+    scheduleSnapshotsForAlerts({
+      userId,
+      frame,
+      imageData: image,
+      detections: relativeDetections,
+      createdAlerts,
+    });
 
     return res.status(200).json(responsePayload);
   } catch (error) {
@@ -238,10 +346,13 @@ const getVisionSummary = async (req, res, next) => {
   try {
     const state = getVisionState(String(req.user._id));
 
-    return res.status(200).json({
+    const payload = await hydrateSnapshotPaths(String(req.user._id), {
       stats: state.stats,
       alerts: state.alerts.slice(0, 20),
+      activeAlerts: state.activeAlerts.slice(0, 20),
+      alertHistory: state.alertHistory.slice(0, 20),
     });
+    return res.status(200).json(payload);
   } catch (error) {
     return next(error);
   }
@@ -256,8 +367,26 @@ const getAlerts = async (req, res, next) => {
       .limit(limit)
       .lean();
 
+    const serialized = alerts.map(serializeAlert);
+    const activeAlerts = serialized
+      .filter((alert) => alert.status === 'active')
+      .sort((left, right) => {
+        const priorityDelta = (PRIORITY_SCORE[right.priority] || 0) - (PRIORITY_SCORE[left.priority] || 0);
+        if (priorityDelta !== 0) return priorityDelta;
+        return new Date(right.lastUpdatedTime || right.timestamp).getTime() - new Date(left.lastUpdatedTime || left.timestamp).getTime();
+      });
+    const alertHistory = serialized
+      .filter((alert) => alert.status === 'resolved')
+      .sort(
+        (left, right) =>
+          new Date(right.lastUpdatedTime || right.timestamp).getTime() -
+          new Date(left.lastUpdatedTime || left.timestamp).getTime()
+      );
+
     return res.status(200).json({
-      alerts: alerts.map(serializeAlert),
+      alerts: serialized,
+      activeAlerts,
+      alertHistory,
     });
   } catch (error) {
     return next(error);

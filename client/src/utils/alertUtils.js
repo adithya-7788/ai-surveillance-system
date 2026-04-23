@@ -49,6 +49,16 @@ export const getAlertBadge = (type, status = 'active') => {
   return badge;
 };
 
+export const getPriorityBadge = (priority = 'low') => {
+  const badges = {
+    high: { label: 'HIGH', bgColor: 'bg-rose-900/40', textColor: 'text-rose-300' },
+    medium: { label: 'MEDIUM', bgColor: 'bg-amber-900/40', textColor: 'text-amber-300' },
+    low: { label: 'LOW', bgColor: 'bg-emerald-900/40', textColor: 'text-emerald-300' },
+    info: { label: 'INFO', bgColor: 'bg-sky-900/40', textColor: 'text-sky-300' },
+  };
+  return badges[priority] || badges.low;
+};
+
 export const getAlertMetadata = (alert) => {
   if (!alert?.metadata) return null;
 
@@ -68,6 +78,14 @@ export const getAlertMetadata = (alert) => {
     return `Duration: ${alert.metadata.duration}s`;
   }
 
+  if (alert.type === 'entry_exit_session') {
+    const duration = Number(alert.metadata?.duration ?? alert.duration);
+    if (Number.isFinite(duration) && duration > 0) {
+      return `Session duration: ${duration}s`;
+    }
+    return 'Entry to exit session completed';
+  }
+
   if (alert.type === 'crowd' && alert.metadata.count) {
     return `Count: ${alert.metadata.count} people`;
   }
@@ -84,6 +102,7 @@ export const getAlertMetadata = (alert) => {
 };
 
 export const mergeAlertsById = (currentAlerts = [], incomingAlerts = []) => {
+  const priorityWeight = { high: 4, medium: 3, low: 2, info: 1 };
   const alertMap = new Map();
 
   for (const alert of [...currentAlerts, ...incomingAlerts]) {
@@ -103,8 +122,29 @@ export const mergeAlertsById = (currentAlerts = [], incomingAlerts = []) => {
   }
 
   return Array.from(alertMap.values()).sort((left, right) => {
-    const leftTime = new Date(left.timestamp || left.time || 0).getTime();
-    const rightTime = new Date(right.timestamp || right.time || 0).getTime();
+    if (left.status !== right.status) {
+      return left.status === 'active' ? -1 : 1;
+    }
+
+    if (left.status === 'active') {
+      const priorityDelta = (priorityWeight[right.priority] || 0) - (priorityWeight[left.priority] || 0);
+      if (priorityDelta !== 0) return priorityDelta;
+    }
+
+    const leftTime = new Date(left.lastUpdatedTime || left.timestamp || left.time || 0).getTime();
+    const rightTime = new Date(right.lastUpdatedTime || right.timestamp || right.time || 0).getTime();
     return rightTime - leftTime;
   });
+};
+
+export const mergeAlertCollections = (currentCollections, incomingPayload = {}) => {
+  const activeAlerts = mergeAlertsById(currentCollections.activeAlerts || [], incomingPayload.activeAlerts || []);
+  const alertHistory = mergeAlertsById(currentCollections.alertHistory || [], incomingPayload.alertHistory || []);
+  const alerts = mergeAlertsById(currentCollections.alerts || [], incomingPayload.alerts || []);
+
+  return {
+    alerts,
+    activeAlerts,
+    alertHistory,
+  };
 };

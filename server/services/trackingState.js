@@ -46,11 +46,30 @@ const isInsideROIMask = (centroid, roiMask) => {
 const alertTitles = {
   entry: 'Person entered',
   exit: 'Person exited',
+  entry_exit_session: 'Entry/Exit session',
   loitering: 'Loitering detected',
   crowd: 'Crowd threshold exceeded',
   restricted_time: 'Restricted time entry',
   suspicious_activity: 'Suspicious Activity Detected',
   suspicious: 'Suspicious Activity Detected',
+};
+
+const alertPriorities = {
+  suspicious: 'high',
+  suspicious_activity: 'high',
+  loitering: 'medium',
+  crowd: 'medium',
+  entry: 'low',
+  exit: 'low',
+  entry_exit_session: 'low',
+  restricted_time: 'info',
+};
+
+const priorityWeight = {
+  high: 4,
+  medium: 3,
+  low: 2,
+  info: 1,
 };
 
 const userStateMap = new Map();
@@ -263,6 +282,11 @@ const toRelativeDetections = (detections, frameWidth, frameHeight) => {
 };
 
 const getStateKey = (type, suffix) => `${type}:${suffix}`;
+const getPersonAlertKey = (type, personId) => getStateKey(type, Number.isFinite(Number(personId)) ? Number(personId) : 'global');
+
+const getAlertPriority = (type) => alertPriorities[type] || 'low';
+
+const getPriorityScore = (priority) => priorityWeight[priority] || 0;
 
 const buildAlert = ({
   alertKey,
@@ -270,22 +294,34 @@ const buildAlert = ({
   title,
   status = 'active',
   timestamp = Date.now(),
+  startTime = timestamp,
+  lastUpdatedTime = timestamp,
+  duration = 0,
+  priority = getAlertPriority(type),
   personId = null,
   objectType = null,
   metadata = {},
+  snapshotPath = null,
   resolvedAt = null,
+  changeType = null,
 }) => ({
   id: alertKey,
   alertKey,
   type,
   title,
   status,
+  priority,
+  startTime: toISOString(startTime),
+  lastUpdatedTime: toISOString(lastUpdatedTime),
+  duration: Number.isFinite(Number(duration)) ? Number(duration) : 0,
   timestamp: toISOString(timestamp),
   time: formatISTDateTime(new Date(timestamp)),
   personId: Number.isFinite(Number(personId)) ? Number(personId) : null,
   objectType: objectType || null,
   metadata: metadata || {},
+  snapshotPath: snapshotPath || null,
   resolvedAt: resolvedAt ? toISOString(resolvedAt) : null,
+  changeType,
 });
 
 const getOrCreateState = (userId) => {
@@ -299,9 +335,12 @@ const getOrCreateState = (userId) => {
       trackMemory: new Map(),
       objectMemory: new Map(),
       alertsByKey: new Map(),
+      activeAlerts: [],
+      alertHistory: [],
       alertFeed: [],
       pendingAlertChanges: new Map(),
       crowdAlertKey: null,
+      entrySessionsByPerson: new Map(),
       updatedAt: Date.now(),
     });
   }
@@ -322,8 +361,49 @@ const cleanupUserStates = () => {
 };
 
 const refreshFeed = (state) => {
-  state.alertFeed = Array.from(state.alertsByKey.values())
-    .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
+  const allAlerts = [
+    ...Array.from(state.alertsByKey.values()),
+    ...(state.alertHistory || []),
+  ];
+
+  state.activeAlerts = allAlerts
+    .filter((alert) => alert.status === 'active')
+    .sort((left, right) => {
+      const priorityDelta = getPriorityScore(right.priority) - getPriorityScore(left.priority);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
+      }
+
+      return new Date(right.lastUpdatedTime || right.timestamp).getTime() - new Date(left.lastUpdatedTime || left.timestamp).getTime();
+    })
+    .slice(0, MAX_ALERTS);
+
+  state.alertHistory = allAlerts
+    .filter((alert) => alert.status === 'resolved')
+    .sort(
+      (left, right) =>
+        new Date(right.lastUpdatedTime || right.timestamp).getTime() -
+        new Date(left.lastUpdatedTime || left.timestamp).getTime()
+    )
+    .slice(0, MAX_ALERTS);
+
+  state.alertFeed = allAlerts
+    .sort((left, right) => {
+      if (left.status !== right.status) {
+        return left.status === 'active' ? -1 : 1;
+      }
+
+      if (left.status === 'active') {
+        const priorityDelta = getPriorityScore(right.priority) - getPriorityScore(left.priority);
+        if (priorityDelta !== 0) {
+          return priorityDelta;
+        }
+
+        return new Date(right.lastUpdatedTime || right.timestamp).getTime() - new Date(left.lastUpdatedTime || left.timestamp).getTime();
+      }
+
+      return new Date(right.lastUpdatedTime || right.timestamp).getTime() - new Date(left.lastUpdatedTime || left.timestamp).getTime();
+    })
     .slice(0, MAX_ALERTS);
 };
 
@@ -333,35 +413,64 @@ const queueAlertChange = (state, alert) => {
 
 const upsertAlert = (state, nextAlert) => {
   const existing = state.alertsByKey.get(nextAlert.alertKey);
+  const now = Date.now();
+  const status = nextAlert.status || existing?.status || 'active';
+  const startTime = nextAlert.startTime || existing?.startTime || now;
+  const lastUpdatedTime = nextAlert.lastUpdatedTime || now;
+  const resolvedAt = nextAlert.resolvedAt ?? existing?.resolvedAt ?? null;
+  const durationFromStart = Math.max(
+    0,
+    Math.floor((new Date(status === 'resolved' && resolvedAt ? resolvedAt : lastUpdatedTime).getTime() - new Date(startTime).getTime()) / 1000)
+  );
+
   const merged = buildAlert({
     alertKey: nextAlert.alertKey,
     type: nextAlert.type || existing?.type,
     title: nextAlert.title || existing?.title || alertTitles[nextAlert.type],
-    status: nextAlert.status || existing?.status || 'active',
-    timestamp: nextAlert.timestamp || Date.now(),
+    status,
+    priority: nextAlert.priority || existing?.priority || getAlertPriority(nextAlert.type || existing?.type),
+    timestamp: nextAlert.timestamp || now,
+    startTime,
+    lastUpdatedTime,
+    duration: nextAlert.duration ?? existing?.duration ?? durationFromStart,
     personId: nextAlert.personId ?? existing?.personId ?? null,
     objectType: nextAlert.objectType ?? existing?.objectType ?? null,
     metadata: {
       ...(existing?.metadata || {}),
       ...(nextAlert.metadata || {}),
     },
-    resolvedAt: nextAlert.resolvedAt ?? existing?.resolvedAt ?? null,
+    snapshotPath: nextAlert.snapshotPath ?? existing?.snapshotPath ?? null,
+    resolvedAt,
+    changeType: existing ? 'updated' : 'created',
   });
 
-  state.alertsByKey.set(merged.alertKey, merged);
+  if (merged.status === 'resolved') {
+    state.alertsByKey.delete(merged.alertKey);
+    state.alertHistory = [merged, ...(state.alertHistory || []).filter((item) => item.alertKey !== merged.alertKey)].slice(0, MAX_ALERTS);
+  } else {
+    state.alertsByKey.set(merged.alertKey, merged);
+  }
+  console.log('ALERT CREATED:', merged.alertKey, merged.changeType);
   queueAlertChange(state, merged);
   refreshFeed(state);
   return merged;
 };
 
-const createEventAlert = (state, { type, personId = null, objectType = null, metadata = {}, reason = null }) => {
-  const alertKey = `${type}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+const createEventAlert = (state, { type, personId = null, objectType = null, metadata = {}, reason = null, alertKey = null, status = 'active', startTime = null, resolvedAt = null }) => {
+  const derivedAlertKey =
+    alertKey ||
+    (Number.isFinite(Number(personId)) ? getStateKey(type, Number(personId)) : getStateKey(type, 'global'));
+  const now = Date.now();
 
   return upsertAlert(state, {
-    alertKey,
+    alertKey: derivedAlertKey,
     type,
     title: alertTitles[type],
-    status: 'active',
+    status,
+    priority: getAlertPriority(type),
+    startTime: startTime || now,
+    lastUpdatedTime: now,
+    timestamp: now,
     personId,
     objectType,
     metadata: {
@@ -370,15 +479,20 @@ const createEventAlert = (state, { type, personId = null, objectType = null, met
       ...(personId !== null ? { personId } : {}),
       ...(objectType ? { objectType } : {}),
     },
+    resolvedAt,
   });
 };
 
 const createStatefulAlert = (state, { alertKey, type, personId = null, objectType = null, metadata = {} }) => {
+  const now = Date.now();
   return upsertAlert(state, {
     alertKey,
     type,
     title: alertTitles[type],
     status: 'active',
+    priority: getAlertPriority(type),
+    lastUpdatedTime: now,
+    timestamp: now,
     personId,
     objectType,
     metadata,
@@ -396,12 +510,19 @@ const resolveAlert = (state, alertKey, metadata = {}) => {
     type: existing.type,
     title: existing.title,
     status: 'resolved',
+    priority: existing.priority || getAlertPriority(existing.type),
     personId: existing.personId,
     objectType: existing.objectType,
     metadata: {
       ...(existing.metadata || {}),
       ...(metadata || {}),
     },
+    lastUpdatedTime: Date.now(),
+    duration:
+      metadata?.duration ??
+      existing?.duration ??
+      Math.max(0, Math.floor((Date.now() - new Date(existing.startTime || existing.timestamp).getTime()) / 1000)),
+    snapshotPath: existing.snapshotPath || null,
     resolvedAt: Date.now(),
     timestamp: Date.now(),
   });
@@ -589,7 +710,7 @@ const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, set
     nextTrack.roiDurationSeconds = roiDurationSeconds;
 
     if (roiDurationSeconds >= suspiciousInteractionThresholdSeconds) {
-      const suspiciousAlertKey = previous.suspiciousAlertKey || getStateKey('suspicious', `${trackId}:${roiInsideSinceAt}`);
+      const suspiciousAlertKey = previous.suspiciousAlertKey || getPersonAlertKey('suspicious', trackId);
       nextTrack.suspiciousAlertKey = suspiciousAlertKey;
 
       createStatefulAlert(state, {
@@ -610,7 +731,7 @@ const updateTrackState = ({ state, det, inside, roiInside, currentSide, now, set
     const durationSeconds = Math.max(0, Math.floor((now - firstSeenAt) / 1000));
 
     if (durationSeconds >= loiteringThresholdSeconds) {
-      const alertKey = previous.loiteringAlertKey || getStateKey('loitering', `${trackId}:${firstSeenAt}`);
+      const alertKey = previous.loiteringAlertKey || getPersonAlertKey('loitering', trackId);
       nextTrack.loiteringAlertKey = alertKey;
       nextTrack.loiteringDurationSeconds = durationSeconds;
 
@@ -871,6 +992,11 @@ const updateStateWithFrame = ({
       if (track.suspiciousAlertKey) {
         resolveAlert(state, track.suspiciousAlertKey, { reason: 'person left frame' });
       }
+      state.entrySessionsByPerson.delete(trackId);
+      resolveAlert(state, getPersonAlertKey('restricted_time', trackId), {
+        personId: trackId,
+        reason: 'person left frame',
+      });
       state.trackMemory.delete(trackId);
     }
   }
@@ -925,10 +1051,8 @@ const updateStateWithFrame = ({
     const effectiveDirection = sideState.transitionDirection;
     if (effectiveDirection === 'entry') {
       state.stats.entries += 1;
-      createEventAlert(state, {
-        type: 'entry',
-        personId: trackId,
-        metadata: { personId: trackId },
+      state.entrySessionsByPerson.set(trackId, {
+        startedAt: now,
       });
 
       if (isRestrictedTime(settings, new Date(now))) {
@@ -936,6 +1060,8 @@ const updateStateWithFrame = ({
         createEventAlert(state, {
           type: 'restricted_time',
           personId: trackId,
+          alertKey: getPersonAlertKey('restricted_time', trackId),
+          status: 'active',
           metadata: {
             personId: trackId,
             time: timeStr,
@@ -946,10 +1072,28 @@ const updateStateWithFrame = ({
       }
     } else if (effectiveDirection === 'exit') {
       state.stats.exits += 1;
-      createEventAlert(state, {
-        type: 'exit',
+      const session = state.entrySessionsByPerson.get(trackId);
+      if (session?.startedAt) {
+        const sessionDuration = Math.max(0, Math.floor((now - session.startedAt) / 1000));
+        createEventAlert(state, {
+          type: 'entry_exit_session',
+          personId: trackId,
+          alertKey: getStateKey('entry_exit_session', `${trackId}:${session.startedAt}`),
+          status: 'resolved',
+          startTime: session.startedAt,
+          resolvedAt: now,
+          metadata: {
+            personId: trackId,
+            duration: sessionDuration,
+            reason: 'person session completed from entry to exit',
+          },
+        });
+        state.entrySessionsByPerson.delete(trackId);
+      }
+
+      resolveAlert(state, getPersonAlertKey('restricted_time', trackId), {
         personId: trackId,
-        metadata: { personId: trackId },
+        reason: 'person exited monitored area',
       });
     }
 
@@ -985,6 +1129,8 @@ const updateStateWithFrame = ({
   return {
     stats: state.stats,
     alerts: state.alertFeed.slice(0, MAX_ALERTS),
+    activeAlerts: state.activeAlerts.slice(0, MAX_ALERTS),
+    alertHistory: state.alertHistory.slice(0, MAX_ALERTS),
     changes,
     detectionAnnotations,
   };
@@ -996,6 +1142,8 @@ const getVisionState = (userId) => {
   return {
     stats: state.stats,
     alerts: state.alertFeed.slice(0, MAX_ALERTS),
+    activeAlerts: state.activeAlerts.slice(0, MAX_ALERTS),
+    alertHistory: state.alertHistory.slice(0, MAX_ALERTS),
   };
 };
 

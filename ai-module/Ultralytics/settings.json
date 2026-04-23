@@ -1,0 +1,20 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "/Users/adithyareddy/Desktop/TBP_Proj/datasets",
+  "weights_dir": "/Users/adithyareddy/Desktop/TBP_Proj/weights",
+  "runs_dir": "/Users/adithyareddy/Desktop/TBP_Proj/runs",
+  "uuid": "da913c77ec0d2f025f75ef4eaec3155d4f76f31d4d8fcee7080dd2f03caeba5f",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": true,
+  "wandb": true,
+  "vscode_msg": true
+}

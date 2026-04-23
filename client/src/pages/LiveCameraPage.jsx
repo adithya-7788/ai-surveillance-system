@@ -40,7 +40,7 @@ const LiveCameraPage = () => {
   const [processing, setProcessing] = useState(false);
   const [detections, setDetections] = useState([]);
 
-  const { stats, alerts, updateFromFrame } = useVision();
+  const { stats, activeAlerts, updateFromFrame } = useVision();
 
   const drawDetections = useCallback((items) => {
     const canvas = overlayCanvasRef.current;
@@ -274,10 +274,10 @@ const LiveCameraPage = () => {
           </div>
 
           <div className="mt-3 space-y-2">
-            {alerts.length === 0 ? (
+            {activeAlerts.length === 0 ? (
               <p className="text-sm text-slate-400">No recent alerts.</p>
             ) : (
-              alerts.slice(0, 3).map((alert) => {
+              activeAlerts.slice(0, 3).map((alert) => {
                 const badge = getAlertBadge(alert.type, alert.status);
                 const metadata = getAlertMetadata(alert);
 

@@ -3,7 +3,7 @@ import { useVision } from '../context/VisionContext';
 import { getAlertBadge, getAlertMetadata } from '../utils/alertUtils';
 
 const DashboardPage = () => {
-  const { stats, alerts } = useVision();
+  const { stats, activeAlerts } = useVision();
 
   const cards = useMemo(
     () => [
@@ -39,12 +39,12 @@ const DashboardPage = () => {
       <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-soft">
         <h3 className="text-lg font-semibold text-white">Recent Movement Alerts</h3>
         <div className="mt-4 grid gap-4 md:grid-cols-2">
-          {alerts.length === 0 ? (
+          {activeAlerts.length === 0 ? (
             <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 md:col-span-2">
               <p className="text-sm text-slate-400">No alerts yet. Start live camera to generate events.</p>
             </div>
           ) : (
-            alerts.slice(0, 4).map((alert) => {
+            activeAlerts.slice(0, 4).map((alert) => {
               const badge = getAlertBadge(alert.type, alert.status);
               const metadata = getAlertMetadata(alert);
 
