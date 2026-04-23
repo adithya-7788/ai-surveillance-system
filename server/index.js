@@ -10,6 +10,7 @@ const userRoutes = require('./routes/userRoutes');
 const configRoutes = require('./routes/configRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
 const visionRoutes = require('./routes/visionRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 const errorHandler = require('./middleware/errorHandler');
 
 dotenv.config();
@@ -27,14 +28,7 @@ const allowedOrigins = [
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-        return;
-      }
-
-      callback(new Error('Not allowed by CORS'));
-    },
+    origin: true, // Allow all origins during development
     credentials: true,
   })
 );
@@ -50,6 +44,7 @@ app.use('/api/user', userRoutes);
 app.use('/api/config', configRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/vision', visionRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 app.use(errorHandler);
 
