@@ -37,6 +37,7 @@ yarn-error.log*
 *.mp4
 *.avi
 *.mov
+server/uploads/alerts/
 
 # OS
 .DS_Store

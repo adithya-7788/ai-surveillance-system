@@ -74,6 +74,28 @@ const buildOverlaySvg = (width, height, detection) => {
   );
 };
 
+const createBoundingBoxOverlay = ({ metadata, detection }) => {
+  if (!metadata?.width || !metadata?.height || !detection) {
+    return null;
+  }
+
+  const baseWidth = Number(metadata.width);
+  const baseHeight = Number(metadata.height);
+
+  if (!Number.isFinite(baseWidth) || !Number.isFinite(baseHeight) || baseWidth <= 0 || baseHeight <= 0) {
+    return null;
+  }
+
+  const overlayWidth = baseWidth;
+  const overlayHeight = baseHeight;
+
+  if (overlayWidth > baseWidth || overlayHeight > baseHeight) {
+    return null;
+  }
+
+  return buildOverlaySvg(overlayWidth, overlayHeight, detection);
+};
+
 const createSnapshotForAlert = async ({ alert, frame, imageData, detections }) => {
   console.log('SNAPSHOT FUNCTION CALLED');
   console.log('FRAME EXISTS:', Boolean(frame?.buffer || frame?.base64 || imageData));
@@ -98,16 +120,28 @@ const createSnapshotForAlert = async ({ alert, frame, imageData, detections }) =
 
   const detection = getDetectionForAlert(latest, detections);
   console.log('SNAPSHOT SOURCE:', snapshotSource.source);
-  let pipeline = sharp(snapshotSource.buffer).rotate().resize({ width: 540, withoutEnlargement: true });
-  const metadata = await pipeline.metadata();
-  const width = Number(metadata.width || 540);
-  const height = Number(metadata.height || 360);
-  const overlay = buildOverlaySvg(width, height, detection);
-  if (overlay) {
-    pipeline = pipeline.composite([{ input: overlay }]);
-  }
+  const image = sharp(snapshotSource.buffer).rotate();
+  const metadata = await image.metadata();
+  const baseImageBuffer = await image.toBuffer();
+  const overlay = createBoundingBoxOverlay({ metadata, detection });
 
-  await pipeline.jpeg({ quality: 72, mozjpeg: true }).toFile(filePath);
+  try {
+    const withOverlayBuffer = overlay
+      ? await sharp(baseImageBuffer).composite([{ input: overlay }]).toBuffer()
+      : baseImageBuffer;
+
+    await sharp(withOverlayBuffer)
+      .resize({ width: 540, withoutEnlargement: true })
+      .jpeg({ quality: 72, mozjpeg: true })
+      .toFile(filePath);
+  } catch (overlayError) {
+    console.error('[alerts:snapshot] overlay failed, saving without overlay:', overlayError.message);
+
+    await sharp(baseImageBuffer)
+      .resize({ width: 540, withoutEnlargement: true })
+      .jpeg({ quality: 72, mozjpeg: true })
+      .toFile(filePath);
+  }
 
   await Alert.updateOne(
     { _id: latest._id, snapshotPath: null },
